@@ -587,6 +587,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			minimizeToTray(hWnd);
 			return 0;
 		}
+		else
+		{
+			DestroyWindow(hWnd);
+		}
+		break;
 
 	case NID_CBMSG:  // Custom message for tray icon events
 		if (lParam == WM_LBUTTONUP) {  // Left double-click

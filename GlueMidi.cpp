@@ -86,15 +86,17 @@ void GlueMidi::Update()
 			if (ImGui::BeginMenu("Options"))
 			{
 				static bool closetotraytoggle = (bool)GetConfigInt("closetotray", true);
-				if (ImGui::MenuItem("Minimise to tray on close"))
+				if (ImGui::MenuItem("Minimise to tray on close", NULL, &closetotraytoggle))
 				{
 					SetConfigInt("closetotray", closetotraytoggle);
+					SaveSettings();
 				}
 
 				static bool starttraytoggle = (bool)GetConfigInt("startintray", true);
 				if (ImGui::MenuItem("Start minimised to tray", NULL, &starttraytoggle))
 				{
 					SetConfigInt("startintray", starttraytoggle);
+					SaveSettings();
 				}
 
 				ImGui::EndMenu();
