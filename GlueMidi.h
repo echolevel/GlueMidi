@@ -79,10 +79,10 @@ public:
 
 	std::vector<unsigned int> MidiPortNumbers;
 	std::vector<unsigned int> ActiveMidiPortNumbers;
-    std::vector<std::string> MidiInNames; // Always keep this in sync with the numbers. 	
+	std::vector<std::string> MidiInNames; // Always keep this in sync with the numbers. 	
 	std::vector<std::string> ActiveMidiInNames; 
-    std::vector<std::string> MidiOutNames;
-    std::vector<std::string> MidiLogs;
+	std::vector<std::string> MidiOutNames;
+	std::vector<std::string> MidiLogs;
 
     unsigned int MidiOutIndex;
 

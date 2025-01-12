@@ -270,47 +270,8 @@ void GlueMidi::Update()
 				else
 				{
 					outputStatusCol = ImVec4(1.0, 0.0, 0.0, 1.0);
-				}
-				
-				/*
-				if (!MidiOutNames.empty())
-				{
-					const char* combo_preview_value = MidiOutNames[MidiOutIndex].c_str();
-
-					ImGui::SetNextItemWidth(200.f);
-					if (ImGui::BeginCombo("##Output", combo_preview_value, 0))
-					{
-						for (int i = 0; i < MidiOutNames.size(); i++)
-						{
-							const bool is_selected = (MidiOutIndex == i);
-							if (ImGui::Selectable(MidiOutNames[i].c_str(), is_selected))
-							{
-								MidiOutIndex = i;
-
-								openMidiOutPort(i);
-							}
-							if (is_selected)
-							{
-								ImGui::SetItemDefaultFocus();
-							}
-						}
-						ImGui::EndCombo();
-					}
-					ImGui::SameLine();
-					if (strcmp(outputStatus, "Active") == 0)
-					{
-						outputStatusCol = ImVec4(0.0, 1.0, 0.0, 1.0);
-					}
-					else
-					{
-						outputStatusCol = ImVec4(1.0, 0.0, 0.0, 1.0);
-					}
-					
-				}
-				*/
-
+				}				
 			}
-
 
 			ImGui::EndTable();
 		}
