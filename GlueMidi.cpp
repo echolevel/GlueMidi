@@ -153,78 +153,51 @@ void GlueMidi::Update()
 			ImGui::TableSetColumnIndex(0);
 			{
 				
-				ImGui::Text("Inputs");
+				ImGui::Text("  M   L  Input Port");
+				ImGui::SetItemTooltip("M toggles mute (send no data to output)\nL toggles logging to midi monitor\nClick input to toggle active status");
 
 				ImGui::SetNextItemWidth(-FLT_MIN);
-				if (ImGui::BeginListBox("##InputsList")) {
-				
-					// Show the MIDI inputs list box.
-					// Clicking an item will toggle that input open or closed.
-					// Multiple inputs can be open. Closed inputs should be removed
-					// from ActiveMidiInNames.
+				if (ImGui::BeginListBox("##InputsList", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * InputItems.size() * 2.0))) {				
 
-					for (int i = 0; i < MidiInNames.size(); i++)
+					for (int i = 0; i < InputItems.size(); i++)
 					{
 						ImGui::PushID(i);
-						bool selected = false;
-						
-						for (size_t a = 0; a < ActiveMidiPortNumbers.size(); a++)
-						{
-							if (i == ActiveMidiPortNumbers[a])
-							{
-								selected = true;
-							}
-						}
-
-						bool muted = true;
+						bool selected = InputItems[i].Active;
+						bool muted = InputItems[i].Muted;
+						bool displaylog = InputItems[i].DisplayLog;
 						if (ImGui::Checkbox("##mute", &muted))
 						{
-
+							InputItems[i].Muted = muted;
 						}
 						ImGui::SameLine();
-						if (ImGui::Selectable(MidiInNames[i].c_str(), &selected))
+						if (ImGui::Checkbox("##displaylog", &displaylog))
+						{
+							InputItems[i].DisplayLog = displaylog;
+						}
+						
+						ImGui::SameLine();
+
+						if (ImGui::Selectable(InputItems[i].Name.c_str(), &selected))
 						{
 							if (selected)
 							{
-								openMidiInPort(i);
-								ActiveMidiPortNumbers.push_back(i);
-								ActiveMidiInNames.push_back(MidiInNames[i]);
-								SetConfigStringArray("inmidis", ActiveMidiInNames);
-								Log((MidiInNames[i] + " OPENED").c_str());
+								openMidiInPort(InputItems[i].Index);
+								InputItems[i].Active = true;
+								UpdateConfigActiveInputs();
+								Log((InputItems[i].Name + " OPENED").c_str());
 							}
 							else
 							{
-								// It's been deselected, so we have to remove it from
-								// ActiveMidiInNames, close the port, and write the config array
-								for (size_t m = 0; m < midiInputs.size(); m++)
-								{
-									if (midiInputs[m]->getPortName(i).length() > 0)
-									{
-										midiInputs[m]->closePort();
-										Log((midiInputs[m]->getPortName(i) + " CLOSED").c_str());
-									}									
-								}
-
-								for (size_t n = 0; n < ActiveMidiInNames.size(); n++)
-								{
-									if (ActiveMidiInNames[n] == MidiInNames[i])
-									{
-										remove(ActiveMidiInNames, n);
-									}
-								}
-
-								for (size_t q = 0; q < ActiveMidiPortNumbers.size(); q++)
-								{
-									if (ActiveMidiPortNumbers[q] == i)
-									{
-										remove(ActiveMidiPortNumbers, q);
-									}
-								}
+								InputItems[i].midiinput->closePort();
+								InputItems[i].Active = false;
+								Log((InputItems[i].Name + " CLOSED").c_str());
 							}
+
+							// Update the config after enabling or disabling an input
+							UpdateConfigActiveInputs();
 						}
 						ImGui::PopID();
 					}
-
 					ImGui::EndListBox();
 				}
 
@@ -248,7 +221,7 @@ void GlueMidi::Update()
 
 				// MIDI out listbox
 				ImGui::SetNextItemWidth(-FLT_MIN);
-				if (ImGui::BeginListBox("##outlist"))
+				if (ImGui::BeginListBox("##outlist", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * MidiOutNames.size() * 2.0)))
 				{
 					// MIDI out selectables
 					for (int k = 0; k < MidiOutNames.size(); k++)
@@ -290,49 +263,8 @@ void GlueMidi::Update()
 		ImGui::Text("Midi Monitor");
 
 		ImGui::AlignTextToFramePadding();
-		ImGui::Text("Filter:");
-
+		ImGui::Text("Filters: ");
 		ImGui::SameLine();
-
-		if (!MidiInNames.empty())
-		{
-			const char* filter_combo_preview_value = MidiInNames[FilterPortIndex].c_str();;
-			ImGui::SetNextItemWidth(200.f);
-
-			ImGui::BeginDisabled(!FilterByPort);
-			if (ImGui::BeginCombo("##MonitorPortFilter", filter_combo_preview_value, 0))
-			{
-				for (int i = 0; i < MidiInNames.size(); i++)
-				{
-					const bool is_selected = (FilterPortIndex == i);
-
-					if (ImGui::Selectable(MidiInNames[i].c_str(), is_selected))
-					{
-						FilterPortIndex = i;
-						filter_combo_preview_value = MidiInNames[i].c_str();
-					}
-					if (is_selected)
-					{
-						ImGui::SetItemDefaultFocus();
-					}
-
-				}
-				ImGui::EndCombo();
-			}
-			ImGui::EndDisabled();
-
-			ImGui::SameLine();
-			static bool bPortfilter = FilterByPort;
-			if (ImGui::Checkbox("Port", &bPortfilter))
-			{
-				FilterByPort = bPortfilter;
-			}
-		}
-				
-		
-		ImGui::Text("Show");
-		ImGui::SameLine();
-
 		static bool c_shownotes = filterShowNotes;
 		if (ImGui::Checkbox("Notes", &c_shownotes))
 		{
@@ -557,17 +489,26 @@ int GlueMidi::refreshMidiPorts()
 			//return -1;
 		}
 	}
-
+	
 	if (midiin)
 	{
-		MidiInNames.clear();		
-		midiInputs.clear(); 
+		// Close everything and flush the InputItems array. There's no advantage to keeping
+		// existing ports open, and the chance of future disaster if enumeration indices change.
+		for (auto& Item : InputItems)
+		{
+			if (Item.midiinput)
+			{
+				Item.midiinput->closePort();
+			}
+		}
+		InputItems.clear();
 
 		unsigned int nPorts = midiin->getPortCount();
-		std::string portName;
 
 		for (unsigned int i = 0; i < nPorts; i++)
 		{
+			std::string portName = "";
+
 			try
 			{
 				portName = midiin->getPortName(i);
@@ -579,19 +520,12 @@ int GlueMidi::refreshMidiPorts()
 				Log(error.getMessage().c_str());
 				return -1;
 			}
-			std::cout << " Input Port #" << i + 1 << ": " << portName << '\n';
-
-			// Store the name after stripping the index number, so we can compare 
-			// with devices of the same name (but possibly a different index) on 
-			// next startup.
-			std::string nameTrimmed = portName.substr(0, portName.find_last_of(' '));
-			MidiInNames.push_back(nameTrimmed);	
-			MidiPortNumbers.push_back(i); // This is more important; the name is just for comparison and display
-			Log(nameTrimmed.c_str());				
+			
+			// Add a new InputItem and display the truncated name
+			InputItems.push_back(InputItem(this, portName, i));
+			Log(InputItems.back().Name.c_str());			
 		}
-
 	}
-	
 
 	if (midiout)
 	{
@@ -622,6 +556,8 @@ int GlueMidi::refreshMidiPorts()
 		std::cout << '\n';
 	}
 
+	Log("MIDI ports refreshed successfully");
+
 	return 1;
 }
 
@@ -634,7 +570,8 @@ static void midiInCallback(double deltatime, std::vector<unsigned char>* message
 {
 	globalInstance->AnimDeltaCounter += deltatime;
 
-	const char* InputName = static_cast<const char*>(userData);
+	//const char* InputName = static_cast<const char*>(userData);
+	InputItem* inputitem = static_cast<InputItem*>(userData);
 
 	if (globalInstance == nullptr)
 	{
@@ -646,6 +583,13 @@ static void midiInCallback(double deltatime, std::vector<unsigned char>* message
 		return;
 	}
 
+	int channel = 0;
+	int note = 0;
+	bool noteOff = false;
+	int velocity = 0;
+	int pressure = 0;
+	int program = 0;
+	int pitchbend = 0x2000;
 	int ccNum = 0;
 	int ccChan = 0;
 	int ccValue = 0;
@@ -653,6 +597,111 @@ static void midiInCallback(double deltatime, std::vector<unsigned char>* message
 	int value14bit = 0;
 
 	std::stringstream finalhexout;
+
+	int statusByte = (int)message->at(0);
+
+	switch (statusByte >> 4)
+	{
+		case 0x08:	// Note Off
+			channel = statusByte & 0x0F;
+			note = (int)message->at(1);
+			velocity = (int)message->at(2);
+			break;
+
+		case 0x09:	// Note On
+			channel = statusByte & 0x0F;
+			note = (int)message->at(1);
+			velocity = (int)message->at(2);
+			break;
+
+		case 0x0a:	// Poly aftertouch
+			channel = statusByte & 0x0F;
+			note = (int)message->at(1);
+			pressure = (int)message->at(2);
+			break;
+
+		case 0x0b:	// Control Change (or mode change)
+			channel = statusByte & 0x0F;
+			ccNum = (int)message->at(1);
+			ccValue = (int)message->at(2);
+			break;
+
+		case 0x0c:	// Program Change
+			channel = statusByte & 0x0F;
+			program = (int)message->at(1);
+			break;
+
+		case 0x0d:	// Channel aftertouch
+			channel = statusByte & 0x0F;
+			pressure = (int)message->at(1);
+			break;
+		case 0x0e:	// Pitchbend
+			channel = statusByte & 0x0F;
+			int lsb = (int)message->at(1);
+			int msb = (int)message->at(2);
+			pressure = (msb << 7) | lsb;
+			break;
+	}
+
+	// System Common
+	switch (statusByte)
+	{
+		case 0xf0:	// Sysex start
+
+			break;
+		case 0xf1:	// Quarter Frame
+
+			break;
+		case 0xf2:	// Song Position Pointer
+
+			break;
+		case 0xf3:	// Song Select
+
+			break;
+		case 0xf4:	// undefined
+
+			break;
+		case 0xf5:	// undefined
+
+			break;
+		case 0xf6:	// Tune Request
+
+			break;
+		case 0xf7:	// Sysex end
+
+			break;
+	}
+
+	// System Realtime
+	switch (statusByte)
+	{
+		case 0xf8:	// Timing clock
+			
+			break;	
+		case 0xf9:	// undefined
+
+			break;	
+		case 0xfa:	// Start
+
+			break;
+		case 0xfb:	// Continue
+
+			break;
+		case 0xfc:	// Stop
+
+			break;
+		case 0xfd:	// undefined
+
+			break;
+		case 0xfe:	// Active Sensing
+
+			break;
+		case 0xff:	// System Reset
+
+			break;
+	}
+
+
 
 	// Is this a sysex message?
 	if (((int)message->at(0) == 0xF0) && (message->size() >= 14) && !globalInstance->displayRaw)
@@ -726,10 +775,18 @@ static void midiInCallback(double deltatime, std::vector<unsigned char>* message
 	}
 	
 	
-
-	globalInstance->Log((finalhexout.str() + + "\t" + InputName).c_str());
-
-	globalInstance->SendMessageOnPort(message, globalInstance->midiout);
+	// Is logging enabled for this input?
+	if (inputitem->DisplayLog)
+	{
+		globalInstance->Log((finalhexout.str() + +"\t" + inputitem->Name).c_str());
+	}
+	
+	// Is this input muted?
+	if (!inputitem->Muted)
+	{
+		globalInstance->SendMessageOnPort(message, globalInstance->midiout);
+	}
+	
 
 	if (globalInstance->AnimDeltaCounter > globalInstance->AnimDeltaThreshold)
 	{
@@ -740,33 +797,35 @@ static void midiInCallback(double deltatime, std::vector<unsigned char>* message
 
 int GlueMidi::openMidiInPort(int InIndex)
 {	
-	try
+	for (auto& Item : InputItems)
 	{
-		// Make sure our GlueMidi instance will be accessible in the callback
-		if (globalInstance == nullptr)
+		if (Item.Index == InIndex)
 		{
-			globalInstance = this;
+			try
+			{
+				// Make sure our GlueMidi instance will be accessible in the callback
+				if (globalInstance == nullptr)
+				{
+					globalInstance = this;
+				}
+
+				if (Item.midiinput == nullptr)
+				{
+					Item.midiinput = std::make_unique<RtMidiIn>();
+				}
+				Item.midiinput->setCallback(midiInCallback, (void*)&Item);
+				Item.midiinput->openPort(InIndex);
+				Item.midiinput->ignoreTypes(false, true, true);
+				Item.Active = true;
+				Log(Item.Name.c_str());
+			}
+			catch (RtMidiError& error) {
+				error.printMessage();
+				Log(error.getMessage().c_str());
+				return 0;
+			}
+			
 		}
-		// Create the instance
-		auto thisInput = std::make_unique<RtMidiIn>();
-		thisInput->setCallback(midiInCallback, (void*)MidiInNames[InIndex].c_str());
-		thisInput->openPort(InIndex);		
-		thisInput->ignoreTypes(false, true, true);
-
-		midiInputs.push_back(std::move(thisInput));
-
-		// TO DO - status strings per input
-		snprintf(inputStatus, 32, "Active");
-		return 1;
-
-		Log(MidiInNames[InIndex].c_str());
-		
-	}
-	catch (RtMidiError& error) {
-		error.printMessage();
-		Log(error.getMessage().c_str());
-		snprintf(inputStatus, 32, "Inactive");
-		return 0;
 	}
 
 	return 0;
@@ -797,19 +856,23 @@ int GlueMidi::openMidiOutPort(int OutIndex)
 
 void GlueMidi::releaseMidiPorts(char* inputStatus, char* outputStatus)
 {
-	if (midiin && midiin->isPortOpen())
+	for (auto& Item : InputItems)
 	{
-		midiin->closePort();
-		sprintf_s(inputStatus, 32, "Inactive");
+		if (Item.midiinput)
+		{
+			Item.midiinput->closePort();
+			Item.midiinput = nullptr;
+		}		
+		Item.Active = false;
 	}
-
+	
 	if (midiout && midiout->isPortOpen())
 	{
 		midiout->closePort();
 		sprintf_s(outputStatus, 32, "Inactive");
 	}
 
-	Log("MIDI ports closed");
+	Log("MIDI ports closed and released");
 }
 
 void GlueMidi::Log(const char* fmt) {

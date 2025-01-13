@@ -179,50 +179,34 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	
 
-
-
-	
-
-	
-
 	if (gluemidi->refreshMidiPorts() < 1)
 	{
 		return -1;
 	}
-
+	
 	if (gluemidi->settings_were_loaded)
 	{
 		// Attempt to open the previously used MIDI device ports.
 		// Note that we copy the config array first, and don't remove any ports that
 		// we don't find in the current MidiInNames. Maybe you'll plug it in next time,
 		std::vector<std::string> PrevMidiIns = gluemidi->GetConfigStringArray("inmidis");
-		gluemidi->ActiveMidiInNames = gluemidi->GetConfigStringArray("inmidis");
-		if (gluemidi->ActiveMidiInNames.size() > 0)
+
+		for (int p = 0; p < PrevMidiIns.size(); p++)
 		{
-			for (size_t t = 0; t < gluemidi->MidiInNames.size(); t++)
+			for (auto& Item : gluemidi->InputItems)
 			{
-				// For every name, check if it should be opened
-				for (size_t a = 0; a < gluemidi->ActiveMidiInNames.size(); a++)
+				if (Item.Name == PrevMidiIns[p])
 				{
-					std::string CompareName = gluemidi->ActiveMidiInNames[a];
-
-					if (CompareName == gluemidi->MidiInNames[t])
-					{
-						gluemidi->openMidiInPort(t);
-						gluemidi->ActiveMidiPortNumbers.push_back(t);
-					}
+					gluemidi->openMidiInPort(Item.Index);
+					Item.Active = true;
+					gluemidi->UpdateConfigActiveInputs();
+					gluemidi->Log((Item.Name + " OPENED").c_str());										
 				}
-
 			}
 		}
-
-
+		
 
 		std::string PrevMidiOut = gluemidi->GetConfigString("outmidi");
-
-		//
-		// TO DO - attempt to restore previously opened input ports
-		//
 
 		for (int i = 0; i < gluemidi->MidiOutNames.size(); i++)
 		{
@@ -233,6 +217,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			}
 		}
 	}
+	
 	
 
 	
@@ -353,7 +338,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	// Setup Dear ImGui style
 	ImGui::StyleColorsDark();
-	SetBessTheme();
+	Fader3ImGuiStyle();
 
 	gluemidi->setupImGuiFonts();
 
@@ -361,10 +346,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	ImGui_ImplWin32_Init(g_hwnd);
 	ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
-	
-
-	// Setup Dear ImGui style
-	SetBessTheme();
 
 	gluemidi->setupImGuiFonts();
 	
@@ -442,7 +423,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// TO DO - make this all work. Testing ser/deser with the full array of names for now
 	std::vector<std::string> activeInputs;
 	
-	gluemidi->SetConfigStringArray("inmidis", gluemidi->ActiveMidiInNames);
+	//gluemidi->SetConfigStringArray("inmidis", gluemidi->ActiveMidiInNames);
 
 	gluemidi->SetConfigString("outmidi", gluemidi->MidiOutNames[gluemidi->MidiOutIndex]);
 	gluemidi->SaveSettings();

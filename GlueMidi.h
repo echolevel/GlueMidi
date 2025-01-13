@@ -18,7 +18,36 @@
 #define LINEBUFFERMAX 1023
 #define LINESMAX 1023
 
+// Forward declare for the struct 
+class GlueMidi;
 
+struct InputItem {
+		
+	GlueMidi* gluemidi; // The main GM instance	
+	std::unique_ptr<RtMidiIn> midiinput; // To hold the MidiIn object that we'll create
+	std::string NameIndexed; // Name suffixed by the enumeration index (unreliable)
+	std::string Name; // Name without index suffix, for comparison purposes (slightly less unreliable)
+	bool Active; // For UI control purposes
+	bool Muted; // For passthrough filtering purposes
+	bool DisplayLog;
+	unsigned int Index; // This input's index as of the last port enumeration (relibable only until the next enumeration)
+	
+	// On startup/refresh enumeration, we loop all available inputs and create an
+	// InputItem for each. It has name, index and a pointer to the gm instance so
+	// it can be looped for UI display, but it has no RtMidiIn object until that's
+	// set up in openMidiInPort.
+	InputItem(GlueMidi* InGlueMidi, std::string InName, unsigned int InIndex)
+	{
+		gluemidi = InGlueMidi;
+		NameIndexed = InName;
+		Name = NameIndexed.substr(0, NameIndexed.find_last_of(' '));
+		Active = false;
+		Muted = false;
+		DisplayLog = true;
+		Index = InIndex;
+	};
+
+};
 
 class GlueMidi {
 
@@ -79,15 +108,12 @@ public:
 
 	ImFont* iconFont;
 
-	std::vector<unsigned int> MidiPortNumbers;
-	std::vector<unsigned int> ActiveMidiPortNumbers;
-	std::vector<std::string> MidiInNames; // Always keep this in sync with the numbers. 	
-	std::vector<std::string> ActiveMidiInNames; 
+	std::vector<InputItem> InputItems;
+	
 	std::vector<std::string> MidiOutNames;
+	unsigned int MidiOutIndex;
+	
 	std::vector<std::string> MidiLogs;
-	std::vector<bool> InputMutes;
-
-    unsigned int MidiOutIndex;
 
     std::vector<unsigned char> IncomingMidiMessage;
     int MidiInNBytes;
@@ -99,9 +125,7 @@ public:
     int lastCCvalue;
 
 
-	// Filter incoming messages by
-	bool FilterByPort = false;
-	int FilterPortIndex = 0; // -1 shows all devices/ports
+	// Filter incoming messages by	
 	int filterChannel = 0; // show only this channel (0 disables)
 	int filterCC = -1; // show only this CC number (-1 disables)
 	bool filter14bit= false; // show only 14bit values 
@@ -241,6 +265,20 @@ public:
 			oss << InArray[i];
 		}
 		settings_pairs[InName] = oss.str();
+	}
+
+	// Call after enabling or disabling an input
+	void UpdateConfigActiveInputs()
+	{
+		std::vector<std::string> ActiveInputs;
+		for (auto& Item : InputItems)
+		{
+			if (Item.Active)
+			{
+				ActiveInputs.push_back(Item.Name);
+			}
+		}
+		SetConfigStringArray("inmidis", ActiveInputs);
 	}
 
 	void SaveSettings()
