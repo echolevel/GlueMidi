@@ -23,6 +23,8 @@
 class GlueMidi {
 
 public:
+	// GlueMidi instance is constructed with a pointer to a function in 
+	// main.cpp that will be our icon animation update call
 	GlueMidi(void (*func)());
 
 	~GlueMidi();
@@ -83,6 +85,7 @@ public:
 	std::vector<std::string> ActiveMidiInNames; 
 	std::vector<std::string> MidiOutNames;
 	std::vector<std::string> MidiLogs;
+	std::vector<bool> InputMutes;
 
     unsigned int MidiOutIndex;
 
@@ -109,6 +112,9 @@ public:
 	bool filterShowSys = true;
 	bool filterShowSysex = true;
 	bool filterShowRaw = true;
+
+	double AnimDeltaCounter = 0;
+	double AnimDeltaThreshold = 0.100;
 
 	// Main ImGui draw window
 	void Update();

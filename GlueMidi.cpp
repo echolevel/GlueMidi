@@ -176,6 +176,12 @@ void GlueMidi::Update()
 							}
 						}
 
+						bool muted = true;
+						if (ImGui::Checkbox("##mute", &muted))
+						{
+
+						}
+						ImGui::SameLine();
 						if (ImGui::Selectable(MidiInNames[i].c_str(), &selected))
 						{
 							if (selected)
@@ -626,6 +632,8 @@ static GlueMidi* globalInstance = nullptr;
 
 static void midiInCallback(double deltatime, std::vector<unsigned char>* message, void* userData )
 {
+	globalInstance->AnimDeltaCounter += deltatime;
+
 	const char* InputName = static_cast<const char*>(userData);
 
 	if (globalInstance == nullptr)
@@ -650,8 +658,6 @@ static void midiInCallback(double deltatime, std::vector<unsigned char>* message
 	if (((int)message->at(0) == 0xF0) && (message->size() >= 14) && !globalInstance->displayRaw)
 	{
 		std::vector<unsigned char>::iterator it = message->begin();
-
-		globalInstance->Log("Received config dump from Fader3");
 
 	}
 
@@ -719,11 +725,17 @@ static void midiInCallback(double deltatime, std::vector<unsigned char>* message
 			return;
 	}
 	
-	globalInstance->CallAnimate();
+	
 
 	globalInstance->Log((finalhexout.str() + + "\t" + InputName).c_str());
 
 	globalInstance->SendMessageOnPort(message, globalInstance->midiout);
+
+	if (globalInstance->AnimDeltaCounter > globalInstance->AnimDeltaThreshold)
+	{
+		globalInstance->CallAnimate();
+		globalInstance->AnimDeltaCounter = 0;
+	}
 }
 
 int GlueMidi::openMidiInPort(int InIndex)

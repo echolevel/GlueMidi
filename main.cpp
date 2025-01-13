@@ -32,6 +32,8 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 HWND g_hwnd;
 
+bool maindone = false;
+
 NOTIFYICONDATA nid = {}; // Tray icon data
 
 static bool ImGuiContextCreated = false;
@@ -94,14 +96,18 @@ void ShowTrayContextMenu(HWND hwnd, POINT pt)
 void AdvanceTrayIconFrame()
 {
 	currentIconFrame = (currentIconFrame + 1) % iconFrames.size();  // Loop through icon frames
-
+	
 	nid.hIcon = iconFrames[currentIconFrame];  // Set the current icon
 	Shell_NotifyIcon(NIM_MODIFY, &nid);  // Modify the tray icon
 
+	// Update the toolbar and taskbar icons
+	SendMessage(g_hwnd, WM_SETICON, ICON_BIG, (LPARAM)iconFrames[currentIconFrame]);
+	SendMessage(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)iconFrames[currentIconFrame]);
+		
 	// Optionally update the tooltip with the current frame info
-	std::wstring tooltip = L"Frame " + std::to_wstring(currentIconFrame + 1);
-	wcscpy_s(nid.szTip, tooltip.c_str());
-	Shell_NotifyIcon(NIM_MODIFY, &nid);
+	//std::wstring tooltip = L"Frame " + std::to_wstring(currentIconFrame + 1);
+	//wcscpy_s(nid.szTip, tooltip.c_str());
+	//Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
 
 // Function to minimize the window to the system tray
@@ -402,6 +408,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 		g_pSwapChain->Present(1, 0); // Present with vsync
 
+		if (maindone)
+		{
+			gluemidi->bDone = true;
+		}
 	}
 
 	
@@ -449,6 +459,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	delete gluemidi->midiin;
 	delete gluemidi->midiout;
 	delete gluemidi;
+
+	for (HICON icon : iconFrames)
+	{
+		DestroyIcon(icon);
+	}
+
 	return 0;
 }
 
@@ -589,6 +605,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		}
 		else
 		{
+			maindone = true;
 			DestroyWindow(hWnd);
 		}
 		break;
