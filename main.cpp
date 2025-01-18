@@ -32,6 +32,8 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 HWND g_hwnd;
 
+static GlueMidi* g_gluemidi;
+
 bool maindone = false;
 
 NOTIFYICONDATA nid = {}; // Tray icon data
@@ -154,6 +156,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		exit(EXIT_FAILURE);
 	}
 	
+
+	g_gluemidi = gluemidi;
 
 	// Get the monitor's dimensions so we can start the app bang in the middle of it,
 	// in case there are no previously stored settings
@@ -608,6 +612,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		{
 			case 1: 
 				MessageBox(hWnd, L"Refresh Ports", L"Info", MB_OK);
+				if (g_gluemidi != nullptr)
+				{
+					g_gluemidi->refreshMidiPorts();
+				}
 				break;
 			case 2:
 				Shell_NotifyIcon(NIM_DELETE, &nid);

@@ -21,6 +21,59 @@ void remove(std::vector<T>& vec, std::size_t pos)
 	vec.erase(it);
 }
 
+// Helper function to transform a string to lowercase and remove whitespace
+std::string normaliseString(const std::string& str) {
+	std::string result;
+	for (char c : str) {
+		if (!std::isspace(static_cast<unsigned char>(c))) {
+			result += std::tolower(static_cast<unsigned char>(c));
+		}
+	}
+	return result;
+}
+
+// Function to check if the buffer matches any Name partially
+bool partialMatchFilter(const char* buf_filter, std::string Name) {
+	
+	// Return false if the buffer is null or empty
+	if (buf_filter == nullptr || buf_filter[0] == '\0') {
+		return false;
+	}
+
+
+	// Normalize the buffer string
+	std::string filterStr = normaliseString(buf_filter);
+
+	std::string normalisedName = normaliseString(Name);
+	if (normalisedName.find(filterStr) != std::string::npos) {
+		return true; // Partial match found
+	}
+
+	return false; // No partial match found
+}
+
+// Function to split a string by a delimiter
+std::vector<std::string> splitString(const std::string& str, char delimiter) {
+	std::vector<std::string> tokens;
+	std::stringstream ss(str);
+	std::string token;
+	while (std::getline(ss, token, delimiter)) {
+		tokens.push_back(token);
+	}
+	return tokens;
+}
+
+bool isInputEmpty(const char* buffer) {
+	if (buffer == nullptr) return true; // Null buffer is considered empty
+
+	for (const char* p = buffer; *p != '\0'; ++p) {
+		if (!std::isspace(static_cast<unsigned char>(*p))) {
+			return false; // Found a non-whitespace character
+		}
+	}
+	return true; // Buffer is empty or only contains whitespace
+}
+
 GlueMidi::GlueMidi(void (*func)())
 	:callbackFunc(func)
 {
@@ -153,29 +206,38 @@ void GlueMidi::Update()
 			ImGui::TableSetColumnIndex(0);
 			{
 				
-				ImGui::Text("  M   L  Input Port");
-				ImGui::SetItemTooltip("M toggles mute (send no data to output)\nL toggles logging to midi monitor\nClick input to toggle active status");
+				ImGui::Text("Inputs");
 
 				ImGui::SetNextItemWidth(-FLT_MIN);
 				if (ImGui::BeginListBox("##InputsList", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * InputItems.size() * 2.0))) {				
 
 					for (int i = 0; i < InputItems.size(); i++)
 					{
-						ImGui::PushID(i);
-						bool selected = InputItems[i].Active;
-						bool muted = InputItems[i].Muted;
-						bool displaylog = InputItems[i].DisplayLog;
-						if (ImGui::Checkbox("##mute", &muted))
+						ImGui::PushID(i);						
+
+						if (!InputItems[i].Muted)
 						{
-							InputItems[i].Muted = muted;
+							if (ImGui::Button(ICON_FA_PAUSE))
+							{
+								InputItems[i].Muted =!InputItems[i].Muted;
+								
+							}
+							ImGui::SetItemTooltip("Pause output");
 						}
-						ImGui::SameLine();
-						if (ImGui::Checkbox("##displaylog", &displaylog))
+						else
 						{
-							InputItems[i].DisplayLog = displaylog;
+							if (ImGui::Button(ICON_FA_PLAY))
+							{
+								InputItems[i].Muted = !InputItems[i].Muted;
+							}
+							ImGui::SetItemTooltip("Resume output");
 						}
 						
+						
+
 						ImGui::SameLine();
+
+						bool selected = InputItems[i].Active;
 
 						if (ImGui::Selectable(InputItems[i].Name.c_str(), &selected))
 						{
@@ -295,6 +357,23 @@ void GlueMidi::Update()
 			filterShowRaw = c_showraw;
 		}
 
+		ImGui::SameLine();
+		ImGuiInputTextFlags InTextFlags = ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_AutoSelectAll;
+
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0);
+		ImGui::InputText("##FilterInput", buf_filter, 32, InTextFlags);
+		ImGui::SetItemTooltip("Filter Input names with 3 or more matching characters.\nUse ',' to separate multiple filters.\nEmpty filter logs all inputs.");
+		
+		if (!isInputEmpty(buf_filter))
+		{
+			ImGui::SameLine();
+			if (ImGui::Button(ICON_FA_XMARK))
+			{
+				buf_filter[0] = '\0';
+			}
+		}		
+		
+
 		
 		static ImGuiInputTextFlags flags = ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoHorizontalScroll;
 
@@ -319,9 +398,6 @@ void GlueMidi::Update()
 	}
 	// ImGui demo window
 	//ImGui::ShowDemoWindow();
-
-	// Synchronize GLFW window size with ImGui window
-	//SyncWindowSizeWithImGui(window);
 
 	// Render
 	ImGui::Render();
@@ -598,6 +674,8 @@ static void midiInCallback(double deltatime, std::vector<unsigned char>* message
 
 	std::stringstream finalhexout;
 
+	// https://www.hinton-instruments.co.uk/reference/midi/protocol/index.htm
+
 	int statusByte = (int)message->at(0);
 
 	switch (statusByte >> 4)
@@ -776,8 +854,30 @@ static void midiInCallback(double deltatime, std::vector<unsigned char>* message
 	
 	
 	// Is logging enabled for this input?
-	if (inputitem->DisplayLog)
+	if (!inputitem->LogMute)
 	{
+		//globalInstance->Log((finalhexout.str() + +"\t" + inputitem->Name).c_str());
+	}
+
+	// Is logging soloed for this input?
+	if (!isInputEmpty(globalInstance->buf_filter))
+	{
+		std::string filterStr = normaliseString(globalInstance->buf_filter);
+		std::vector<std::string> filters = splitString(filterStr, ',');
+		
+		for (const auto& filter : filters)
+		{
+			if ((filter.size() >= 3) && partialMatchFilter(filter.c_str(), inputitem->Name))
+			{
+				globalInstance->Log((finalhexout.str() + +"\t" + inputitem->Name).c_str());
+			}
+		}
+
+		
+	}
+	else
+	{
+		// If the input filter IS empty, then we show everything
 		globalInstance->Log((finalhexout.str() + +"\t" + inputitem->Name).c_str());
 	}
 	

@@ -29,7 +29,7 @@ struct InputItem {
 	std::string Name; // Name without index suffix, for comparison purposes (slightly less unreliable)
 	bool Active; // For UI control purposes
 	bool Muted; // For passthrough filtering purposes
-	bool DisplayLog;
+	bool LogMute;
 	unsigned int Index; // This input's index as of the last port enumeration (relibable only until the next enumeration)
 	
 	// On startup/refresh enumeration, we loop all available inputs and create an
@@ -43,7 +43,7 @@ struct InputItem {
 		Name = NameIndexed.substr(0, NameIndexed.find_last_of(' '));
 		Active = false;
 		Muted = false;
-		DisplayLog = true;
+		LogMute = false;
 		Index = InIndex;
 	};
 
@@ -126,6 +126,7 @@ public:
 
 
 	// Filter incoming messages by	
+	char buf_filter[32] = "";
 	int filterChannel = 0; // show only this channel (0 disables)
 	int filterCC = -1; // show only this CC number (-1 disables)
 	bool filter14bit= false; // show only 14bit values 
