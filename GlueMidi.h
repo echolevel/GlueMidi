@@ -108,6 +108,8 @@ public:
 
 	ImFont* iconFont;
 
+	unsigned int InPortCount = 0;
+
 	std::vector<InputItem> InputItems;
 	
 	std::vector<std::string> MidiOutNames;
@@ -157,6 +159,10 @@ public:
 
 	// Flush out and renew our lists of discovered input and output MIDI ports
 	int refreshMidiPorts();
+
+	void reopenSavedPorts();
+
+	bool portCountHasChanged();
 
 	int openMidiInPort(int InIndex);
 
@@ -268,18 +274,37 @@ public:
 		settings_pairs[InName] = oss.str();
 	}
 
-	// Call after enabling or disabling an input
-	void UpdateConfigActiveInputs()
+	// Call after enabling or disabling an input. The config array should contain
+	// every name of an input we've ever wanted to have enabled, regardless of 
+	// whether it's active (it might just be physically unplugged). We only remove
+	// it from the list if it's enumerated and then explicitly disabled from the UI.
+	void UpdateInputsConfig(std::string Name, bool bRemove = false)
 	{
-		std::vector<std::string> ActiveInputs;
-		for (auto& Item : InputItems)
+		std::vector<std::string> PrevMidiIns = GetConfigStringArray("inmidis");
+
+		int foundIdx = -1;
+		for (int i = 0; i < PrevMidiIns.size(); i++)
 		{
-			if (Item.Active)
+			if (PrevMidiIns[i] == Name)
 			{
-				ActiveInputs.push_back(Item.Name);
+				foundIdx = i;
 			}
 		}
-		SetConfigStringArray("inmidis", ActiveInputs);
+
+		if (foundIdx >= 0)
+		{
+			if (bRemove)
+			{
+				PrevMidiIns.erase(PrevMidiIns.begin() + foundIdx);
+			}
+		}
+		else
+		{
+			// Not found, so add it
+			PrevMidiIns.push_back(Name);
+		}
+
+		SetConfigStringArray("inmidis", PrevMidiIns);
 	}
 
 	void SaveSettings()

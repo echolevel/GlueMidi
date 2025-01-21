@@ -245,18 +245,18 @@ void GlueMidi::Update()
 							{
 								openMidiInPort(InputItems[i].Index);
 								InputItems[i].Active = true;
-								UpdateConfigActiveInputs();
+								UpdateInputsConfig(InputItems[i].Name);
 								Log((InputItems[i].Name + " OPENED").c_str());
+								SaveSettings();
 							}
 							else
 							{
 								InputItems[i].midiinput->closePort();
 								InputItems[i].Active = false;
+								UpdateInputsConfig(InputItems[i].Name, true); // remove
 								Log((InputItems[i].Name + " CLOSED").c_str());
+								SaveSettings();
 							}
-
-							// Update the config after enabling or disabling an input
-							UpdateConfigActiveInputs();
 						}
 						ImGui::PopID();
 					}
@@ -297,6 +297,7 @@ void GlueMidi::Update()
 							midiout->closePort();
 							openMidiOutPort(k);
 							SetConfigString("outmidi", MidiOutNames[MidiOutIndex]);
+							SaveSettings();
 						}
 						ImGui::PopID();
 					}
@@ -579,9 +580,9 @@ int GlueMidi::refreshMidiPorts()
 		}
 		InputItems.clear();
 
-		unsigned int nPorts = midiin->getPortCount();
+		InPortCount = midiin->getPortCount();
 
-		for (unsigned int i = 0; i < nPorts; i++)
+		for (unsigned int i = 0; i < InPortCount; i++)
 		{
 			std::string portName = "";
 
@@ -634,7 +635,83 @@ int GlueMidi::refreshMidiPorts()
 
 	Log("MIDI ports refreshed successfully");
 
+	if (settings_were_loaded)
+	{
+		reopenSavedPorts();
+
+		Log("Saved ports reopened successfully");
+	}
+
 	return 1;
+}
+
+void GlueMidi::reopenSavedPorts()
+{	
+// Attempt to open the previously used MIDI device ports.
+// Note that we copy the config array first, and don't remove any ports that
+// we don't find in the current MidiInNames. Maybe you'll plug it in next time,
+	std::vector<std::string> PrevMidiIns = GetConfigStringArray("inmidis");
+
+	for (int p = 0; p < PrevMidiIns.size(); p++)
+	{
+		for (auto& Item : InputItems)
+		{
+			if (Item.Name == PrevMidiIns[p])
+			{
+				openMidiInPort(Item.Index);
+				Item.Active = true;
+				UpdateInputsConfig(Item.Name);
+				Log((Item.Name + " OPENED").c_str());
+			}			
+		}
+	}
+
+
+	std::string PrevMidiOut = GetConfigString("outmidi");
+
+	for (int i = 0; i < MidiOutNames.size(); i++)
+	{
+		if (MidiOutNames[i] == PrevMidiOut)
+		{
+			MidiOutIndex = i;
+			openMidiOutPort(i);
+		}
+	}
+}
+
+bool GlueMidi::portCountHasChanged()
+{
+	if (!midiin)
+	{
+		try
+		{
+			midiin = new RtMidiIn();
+			midiin->setBufferSize(2048, 4);
+			midiout = new RtMidiOut();
+		}
+		catch (RtMidiError& error)
+		{
+			std::cerr << "RtMidiError: ";
+			error.printMessage();
+			Log(error.getMessage().c_str());
+			//exit(EXIT_FAILURE);
+			return false;
+		}
+	}
+
+	if (midiin)
+	{
+		// All we want to do is see if the number of ports has changed
+
+		unsigned int nPorts = midiin->getPortCount();
+
+		if (midiin->getPortCount() != InPortCount)
+		{
+			return true;
+		}		
+	}
+
+	return false;
 }
 
 // We need to use a static var for the main GlueMidi instance because it's for some reason 

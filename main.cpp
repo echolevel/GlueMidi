@@ -56,6 +56,8 @@ int currentIconFrame = 0;
 #define IDI_ICON5 105  // Define the ID for the icon
 #define IDI_ICON6 106  // Define the ID for the icon
 
+#define IDT_TIMER1 1001
+
 // Prepend/append e.g. debugLog(("Sometext: " + astring + "\n").c_str());
 void debugLog(std::string message) {	
 	OutputDebugStringA(message.c_str());
@@ -190,45 +192,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	
 	if (gluemidi->settings_were_loaded)
 	{
-		// Attempt to open the previously used MIDI device ports.
-		// Note that we copy the config array first, and don't remove any ports that
-		// we don't find in the current MidiInNames. Maybe you'll plug it in next time,
-		std::vector<std::string> PrevMidiIns = gluemidi->GetConfigStringArray("inmidis");
-
-		for (int p = 0; p < PrevMidiIns.size(); p++)
-		{
-			for (auto& Item : gluemidi->InputItems)
-			{
-				if (Item.Name == PrevMidiIns[p])
-				{
-					gluemidi->openMidiInPort(Item.Index);
-					Item.Active = true;
-					gluemidi->UpdateConfigActiveInputs();
-					gluemidi->Log((Item.Name + " OPENED").c_str());										
-				}
-			}
-		}
-		
-
-		std::string PrevMidiOut = gluemidi->GetConfigString("outmidi");
-
-		for (int i = 0; i < gluemidi->MidiOutNames.size(); i++)
-		{
-			if (gluemidi->MidiOutNames[i] == PrevMidiOut)
-			{
-				gluemidi->MidiOutIndex = i;
-				gluemidi->openMidiOutPort(i);
-			}
-		}
-	}
-	
-	
-
-	
-
-	
-	
-
+		gluemidi->reopenSavedPorts();
+	}	
 
 	// Create application window
 	WNDCLASSEX wc = { sizeof(WNDCLASSEX), 
@@ -296,6 +261,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		UnregisterClass(wc.lpszClassName, wc.hInstance);
 		return 1;
 	}
+	
+	SetTimer(g_hwnd, IDT_TIMER1, 1000, (TIMERPROC) NULL);
 
 	ShowWindow(g_hwnd, SW_SHOWDEFAULT);
 	UpdateWindow(g_hwnd);
@@ -629,7 +596,25 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		Shell_NotifyIcon(NIM_DELETE, &nid);
 		PostQuitMessage(0);
 		return 0;
+
+	case WM_TIMER:
+		switch (wParam)
+		{
+			case IDT_TIMER1:
+				if (g_gluemidi != nullptr)
+				{
+					if (g_gluemidi->portCountHasChanged())
+					{
+						g_gluemidi->refreshMidiPorts();
+					}
+				}
+			return 0;
+		}
+
 	}
+
+	
+
 	return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
