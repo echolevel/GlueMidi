@@ -188,11 +188,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	if (gluemidi->refreshMidiPorts() < 1)
 	{
 		return -1;
-	}
-	
-	if (gluemidi->settings_were_loaded)
-	{
-		gluemidi->reopenSavedPorts();
 	}	
 
 	// Create application window
@@ -243,7 +238,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	
 
 	RegisterClassEx(&wc);
-	HWND g_hwnd = CreateWindow(wc.lpszClassName, _T("GlueMidi"),
+	g_hwnd = CreateWindow(wc.lpszClassName, _T("GlueMidi"),
 		WS_OVERLAPPEDWINDOW,
 		1280,
 		400,
@@ -398,6 +393,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	gluemidi->SetConfigString("outmidi", gluemidi->MidiOutNames[gluemidi->MidiOutIndex]);
 	gluemidi->SaveSettings();
+
+	gluemidi->releaseMidiPorts();
+
 	ImGui_ImplDX11_Shutdown();
 	ImGui_ImplWin32_Shutdown();
 	ImGui::DestroyContext();
@@ -406,10 +404,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	DestroyWindow(g_hwnd);
 	UnregisterClass(wc.lpszClassName, wc.hInstance);
 
-	gluemidi->midiin->closePort();
-	gluemidi->midiout->closePort();
-	delete gluemidi->midiin;
-	delete gluemidi->midiout;
 	delete gluemidi;
 
 	for (HICON icon : iconFrames)

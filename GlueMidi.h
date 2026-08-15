@@ -14,12 +14,27 @@
 #include <memory.h>
 #include <windows.h>
 #include <mutex>
+#include <atomic>
+#include <deque>
+#include <condition_variable>
+#include <thread>
 
 #define LINEBUFFERMAX 1023
 #define LINESMAX 1023
 
+static constexpr size_t MaxIncomingMidiMessages = 8192;
+static constexpr size_t MaxMonitorMidiMessages = 2048;
+
 // Forward declare for the struct 
 class GlueMidi;
+
+struct QueuedMidiMessage
+{
+	uint64_t InputId = 0;
+	double DeltaTime = 0.0;
+	std::vector<unsigned char> Data;
+	bool ShouldRoute = false;
+};
 
 struct InputItem {
 		
@@ -27,11 +42,13 @@ struct InputItem {
 	std::unique_ptr<RtMidiIn> midiinput; // To hold the MidiIn object that we'll create
 	std::string NameIndexed; // Name suffixed by the enumeration index (unreliable)
 	std::string Name; // Name without index suffix, for comparison purposes (slightly less unreliable)
-	bool Active; // For UI control purposes
-	bool Muted; // For passthrough filtering purposes
+	std::atomic<bool> Active_atomic{false};
+	std::atomic<bool> Muted_atomic { false }; // For passthrough filtering purposes
 	bool LogMute;
 	unsigned int Index; // This input's index as of the last port enumeration (relibable only until the next enumeration)
-	
+	uint64_t Id;
+	std::atomic<bool> AcceptCallbacks_atomic{ false };
+
 	// On startup/refresh enumeration, we loop all available inputs and create an
 	// InputItem for each. It has name, index and a pointer to the gm instance so
 	// it can be looped for UI display, but it has no RtMidiIn object until that's
@@ -41,10 +58,9 @@ struct InputItem {
 		gluemidi = InGlueMidi;
 		NameIndexed = InName;
 		Name = NameIndexed.substr(0, NameIndexed.find_last_of(' '));
-		Active = false;
-		Muted = false;
 		LogMute = false;
 		Index = InIndex;
+		Id = 0;
 	};
 
 };
@@ -68,6 +84,90 @@ private:
 	void (*callbackFunc)(); // Function pointer member
 
 public:
+
+	uint64_t NextInputId = 1;
+
+	// 2026-08-15 Working towards a v0.2.1 that's more robust against 
+	// shitty device drivers. All these mutex locks are temporary
+	// until I a) get all the dodgy RT-touching stuff out of the UI 
+	// loop and b) eventually put the worker thread and RT ownership
+	// into a separate process.
+	// 
+	// 2026-08-16 Lots of improvements, but InputItem state is read by
+	// UI when it shouldn't be, and the inputs container is being 
+	// concurrently read. Not normally a problem but horrible practice...
+
+	std::mutex IncomingMidiMutex;
+	std::condition_variable IncomingMidiCondition;
+	std::deque<QueuedMidiMessage> IncomingMidiQueue;
+
+	void EnqueueMidiMessage(uint64_t InputId, double DeltaTime, bool ShouldRoute, const std::vector<unsigned char>& Message);
+
+	void ProcessMidiMessageForMonitor(InputItem& Input, double deltatime, const std::vector<unsigned char>& message);
+
+	InputItem* FindInputById(uint64_t InputId);
+
+	// MIDI worker thread - this should be the only thing that
+	// calls RtMidiIn openPort/closePort, RtMidiOut openPort/closePort/SendMessage,
+	// getPortCount and getPortName
+	std::thread MidiThread;
+	std::atomic<bool> MidiThreadRunning_atomic{ false };
+
+	std::mutex MonitorMidiMutex;
+	std::deque<QueuedMidiMessage> MonitorMidiQueue;
+
+	void StartMidiThread();
+	void StopMidiThread();
+	void MidiThreadMain();
+
+	void ProcessMonitorMidiMessages();
+	
+	std::mutex MidiCommandMutex;
+	std::condition_variable MidiCommandCondition;
+	
+	enum class EMidiCommandType
+	{
+		OpenOutput,
+		CloseOutput,
+		OpenInput,
+		CloseInput,
+		RefreshPorts,
+		ReleaseAll
+	};
+
+	struct MidiCommand
+	{
+		EMidiCommandType Type;
+		int OutputIndex = -1;
+		int InputIndex = -1;
+	};
+
+	std::deque<MidiCommand> MidiCommandQueue;
+
+	// UI-side request methods (only worker side should ultimately touch RTmidi stuff)
+	void QueueOpenMidiOutput(const int OutputIndex);
+	void QueueCloseMidiOutput();
+
+	void QueueOpenMidiInput(const int InputIndex);
+	void QueueCloseMidiInput(const int InputIndex);
+
+	void QueueRefreshPorts();
+	void QueueReleaseMidi();
+
+	bool HasPendingMidiCommands();
+
+	void ProcessPendingMidiCommands();
+
+	std::atomic<bool> MidiOutputOpen_atomic{ false };
+	std::atomic<int> CurrentOutputIndex_atomic{ -1 };
+
+	struct InputState
+	{
+		std::atomic<bool> Open{ false };
+	};
+
+	std::vector<InputState> InputStates;
+
 
 	// Setup RtMidi
 
@@ -110,7 +210,7 @@ public:
 
 	unsigned int InPortCount = 0;
 
-	std::vector<InputItem> InputItems;
+	std::vector<std::unique_ptr<InputItem>> InputItems;
 	
 	std::vector<std::string> MidiOutNames;
 	unsigned int MidiOutIndex;
@@ -160,36 +260,28 @@ public:
 	// Flush out and renew our lists of discovered input and output MIDI ports
 	int refreshMidiPorts();
 
+	void refreshPorts_Internal();
+
 	void reopenSavedPorts();
 
 	bool portCountHasChanged();
 
-	int openMidiInPort(int InIndex);
 
-	int openMidiOutPort(int OutIndex);
+	void openMidiInput_Internal(const int InputIndex);
 
-	void releaseMidiPorts(char* inputStatus, char* outputStatus);
+	void closeOutput_Internal();
 
-    void SendMessageOnPort(const std::vector<unsigned char>* OutMsg, RtMidiOut* OutInstance)
-    {
-        if (OutInstance)
-        {
-            if (OutInstance->isPortOpen())
-            {
-                try
-                {
-                    OutInstance->sendMessage(OutMsg);
-                }
-                catch (RtMidiError& error)
-                {
-                    std::cerr << "RtMidiError: ";
-                    error.printMessage();
-                    return;
-                }
+	void closeMidiInput_Internal(InputItem& Input);
 
-            }
-        }
-    }
+	void releaseMidiPorts();
+
+	void clearIncomingMidiQueue()
+	{
+		std::lock_guard<std::mutex> Lock(IncomingMidiMutex);
+		IncomingMidiQueue.clear();
+	}
+
+    void SendMessageOnPort(const std::vector<unsigned char>* OutMsg, RtMidiOut* OutInstance);
 
     // Add a log line to the log output text view
     void Log(const char* fmt);

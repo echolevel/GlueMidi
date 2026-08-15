@@ -94,15 +94,663 @@ GlueMidi::GlueMidi(void (*func)())
 	// Try to read ini file
 	iniFileName = "GlueMidisettings.ini";
 	settings_were_loaded = readAppSettings(iniFileName, settings_pairs);
+
+	StartMidiThread();
 }
 
 GlueMidi::~GlueMidi()
 {
+	releaseMidiPorts();
+	StopMidiThread();
 
+	for (auto& Item : InputItems)
+	{
+		if (Item)
+		{
+			closeMidiInput_Internal(*Item);
+		}
+	}
+
+	InputItems.clear();
+
+	if (midiout)
+	{
+		try
+		{
+			if (midiout->isPortOpen())
+			{
+				midiout->closePort();
+			}
+		}
+		catch (...)
+		{
+		}
+
+		delete midiout;
+		midiout = nullptr;
+	}
+
+	delete midiin;
+	midiin = nullptr;
+}
+
+void GlueMidi::EnqueueMidiMessage(uint64_t InputId, double DeltaTime, bool ShouldRoute, const std::vector<unsigned char>& Message)
+{
+	QueuedMidiMessage Queued;
+	Queued.InputId = InputId;
+	Queued.DeltaTime = DeltaTime;
+	Queued.ShouldRoute = ShouldRoute;
+	Queued.Data = Message;
+	
+	{
+		std::lock_guard<std::mutex> Lock(IncomingMidiMutex);
+		
+		// don't let a broken MIDI device gobble unlimited memory
+		if (IncomingMidiQueue.size() >= MaxIncomingMidiMessages)
+		{
+			IncomingMidiQueue.pop_front();
+		}
+
+		IncomingMidiQueue.push_back(std::move(Queued));
+	}
+
+	// unblock anything that's waiting on this
+	IncomingMidiCondition.notify_one();
+}
+
+void GlueMidi::ProcessMidiMessageForMonitor(InputItem& Input, double deltatime, const std::vector<unsigned char>& message)
+{
+	AnimDeltaCounter += deltatime;
+
+
+	if (message.size() < 1)
+	{
+		return;
+	}
+
+	int channel = 0;
+	int note = 0;
+	bool noteOff = false;
+	int velocity = 0;
+	int pressure = 0;
+	int program = 0;
+	int pitchbend = 0x2000;
+	int ccNum = 0;
+	int ccChan = 0;
+	int ccValue = 0;
+	bool is14bit = false;
+	int value14bit = 0;
+
+	std::stringstream finalhexout;
+
+	// https://www.hinton-instruments.co.uk/reference/midi/protocol/index.htm
+
+	const unsigned char statusByte = message[0];
+
+	if (statusByte < 0xF0)
+	{
+		const unsigned char messageType = statusByte & 0xF0;
+
+		const size_t requiredSize =
+			(messageType == 0xC0 || messageType == 0xD0) ? 2 : 3;
+
+		if (message.size() < requiredSize)
+		{
+			return;
+		}
+	}
+
+	switch (statusByte >> 4)
+	{
+	case 0x08:	// Note Off
+		channel = statusByte & 0x0F;
+		note = (int)message.at(1);
+		velocity = (int)message.at(2);
+		break;
+
+	case 0x09:	// Note On
+		channel = statusByte & 0x0F;
+		note = (int)message.at(1);
+		velocity = (int)message.at(2);
+		break;
+
+	case 0x0a:	// Poly aftertouch
+		channel = statusByte & 0x0F;
+		note = (int)message.at(1);
+		pressure = (int)message.at(2);
+		break;
+
+	case 0x0b:	// Control Change (or mode change)
+		channel = statusByte & 0x0F;
+		ccNum = (int)message.at(1);
+		ccValue = (int)message.at(2);
+		break;
+
+	case 0x0c:	// Program Change
+		channel = statusByte & 0x0F;
+		program = (int)message.at(1);
+		break;
+
+	case 0x0d:	// Channel aftertouch
+		channel = statusByte & 0x0F;
+		pressure = (int)message.at(1);
+		break;
+	case 0x0e:	// Pitchbend
+		channel = statusByte & 0x0F;
+		int lsb = (int)message.at(1);
+		int msb = (int)message.at(2);
+		pressure = (msb << 7) | lsb;
+		break;
+	}
+
+	// System Common
+	switch (statusByte)
+	{
+	case 0xf0:	// Sysex start
+
+		break;
+	case 0xf1:	// Quarter Frame
+
+		break;
+	case 0xf2:	// Song Position Pointer
+
+		break;
+	case 0xf3:	// Song Select
+
+		break;
+	case 0xf4:	// undefined
+
+		break;
+	case 0xf5:	// undefined
+
+		break;
+	case 0xf6:	// Tune Request
+
+		break;
+	case 0xf7:	// Sysex end
+
+		break;
+	}
+
+	// System Realtime
+	switch (statusByte)
+	{
+	case 0xf8:	// Timing clock
+
+		break;
+	case 0xf9:	// undefined
+
+		break;
+	case 0xfa:	// Start
+
+		break;
+	case 0xfb:	// Continue
+
+		break;
+	case 0xfc:	// Stop
+
+		break;
+	case 0xfd:	// undefined
+
+		break;
+	case 0xfe:	// Active Sensing
+
+		break;
+	case 0xff:	// System Reset
+
+		break;
+	}
+
+
+
+	// Is this a sysex message?
+ 	if (((int)message.at(0) == 0xF0) && (message.size() >= 14) && !displayRaw)
+ 	{
+ 		std::vector<unsigned char>::const_iterator it = message.begin();
+ 		// UNUSED - we're not formatting sysex yet...
+
+		// until we DO deal with sysex, treat it as raw data
+		for (const unsigned char Byte : message)
+		{
+			finalhexout
+				<< std::setfill('0')
+				<< std::setw(2)
+				<< std::hex
+				<< static_cast<int>(Byte)
+				<< ' ';
+		}
+ 	}
+
+
+
+
+	// Is this a control message status byte? Check if MSB is 0B
+	else if ((((int)message.at(0) >> 4) == 0x0b) && !displayRaw)
+	{
+		ccNum = (int)message.at(1);
+		ccChan = ((int)message.at(0) & 0x0F) + 1;
+		ccValue = (int)message.at(2);
+
+		is14bit = false;
+		value14bit = 0;
+		// If this CC number is equal to the last one + 32, and the channel is the same, it's 14-bit o'clock
+		if ((ccNum == (lastCCnum + 32)) && (ccChan == lastChannel))
+		{
+			is14bit = true;
+			value14bit = (lastCCvalue << 7) | ccValue;
+		}
+
+		// It is, so get the channel from the LSB. We add 1 for display purposes.
+		finalhexout << "Chan:" << ccChan << " ";
+
+		// Control message
+		finalhexout << "CC";
+
+		// Next byte will be CC number
+		finalhexout << ccNum;
+
+		// Then value
+		if (is14bit)
+		{
+			finalhexout << " Value 14bit: " << value14bit;
+		}
+		// Only display 7bit values if the 14bit filter is disabled
+		else
+		{
+			finalhexout << " Value 7bit: " << ccValue;
+		}
+
+		// Cache channel and CC num for later 14-bit checks
+		lastChannel = ccChan;
+		lastCCnum = ccNum;
+		lastCCvalue = ccValue;
+	}
+
+	// It's not CC or sysex so just display raw bytes
+	else for (auto it = message.begin(); it != message.end(); it++)
+	{
+		finalhexout << std::setfill('0') << std::setw(sizeof(char) * 2) << std::hex << int(*it) << " ";
+	}
+
+	const bool isCC = (statusByte & 0xF0) == 0xB0;
+
+	// Always display raw bytes if filter enabled
+	if (!displayRaw)
+	{
+		// Die if channel filter is enabled and this doesn't match
+		if (filterChannel >= 1 &&
+			(!isCC || ccChan != filterChannel))
+		{
+			return;
+		}
+
+		// Die if CC filter is enabled and this doesn't match
+		if (filterCC >= 0 &&
+			(!isCC || ccNum != filterCC))
+		{
+			return;
+		}
+
+		// Die if this is a 7bit value but the 14-bit filter is enabled
+		if (filter14bit && !is14bit)
+		{
+			return;
+		}
+	}
+
+
+	// Is logging enabled for this input?
+	if (!Input.LogMute)
+	{
+		if (!isInputEmpty(buf_filter))
+		{
+			const std::string filterStr = normaliseString(buf_filter);
+			const std::vector<std::string> filters =
+				splitString(filterStr, ',');
+
+			for (const std::string& filter : filters)
+			{
+				if (filter.size() >= 3 &&
+					partialMatchFilter(filter.c_str(), Input.Name))
+				{
+					Log((finalhexout.str() + "\t" + Input.Name).c_str());
+					break;
+				}
+			}
+		}
+		else
+		{
+			Log((finalhexout.str() + "\t" + Input.Name).c_str());
+		}
+	}
+
+	if (AnimDeltaCounter > AnimDeltaThreshold)
+	{
+		CallAnimate();
+		AnimDeltaCounter = 0;
+ 	}
+}
+
+InputItem* GlueMidi::FindInputById(uint64_t InputId)
+{
+	for (auto& ItemPtr : InputItems)
+	{
+		if (ItemPtr && ItemPtr->Id == InputId)
+		{
+			return ItemPtr.get();
+		}
+	}
+
+	return nullptr;
+}
+
+void GlueMidi::StartMidiThread()
+{
+	if (MidiThreadRunning_atomic.exchange(true))
+	{
+		return;
+	}
+
+	MidiThread = std::thread(&GlueMidi::MidiThreadMain, this);
+}
+
+void GlueMidi::StopMidiThread()
+{
+	if (!MidiThreadRunning_atomic.exchange(false))
+	{
+		return;
+	}
+
+	IncomingMidiCondition.notify_all();
+
+	if (MidiThread.joinable())
+	{
+		MidiThread.join();
+	}
+}
+
+void GlueMidi::MidiThreadMain()
+{
+	// Main worker thread loop
+	while (MidiThreadRunning_atomic.load(std::memory_order_acquire))
+	{
+		{
+			std::unique_lock<std::mutex> Lock(IncomingMidiMutex);
+
+			IncomingMidiCondition.wait(
+				Lock,
+				[this]
+				{
+					return
+						!MidiThreadRunning_atomic.load(std::memory_order_acquire)
+						|| !IncomingMidiQueue.empty()
+						|| HasPendingMidiCommands();
+				});
+		}
+
+		if (!MidiThreadRunning_atomic.load(std::memory_order_acquire))
+			break;
+
+		ProcessPendingMidiCommands();
+
+		// Then drain every queued MIDI message
+		while (true)
+		{
+			QueuedMidiMessage Message;
+
+			{
+				std::lock_guard<std::mutex> Lock(IncomingMidiMutex);
+
+				if (IncomingMidiQueue.empty())
+					break;
+
+				Message = std::move(IncomingMidiQueue.front());
+				IncomingMidiQueue.pop_front();
+			}
+
+			if (Message.ShouldRoute)
+			{
+				SendMessageOnPort(&Message.Data, midiout);
+			}
+
+			{
+				std::lock_guard<std::mutex> Lock(MonitorMidiMutex);
+				MonitorMidiQueue.push_back(std::move(Message));
+			}
+		}
+	}
+
+	
+}
+
+void GlueMidi::ProcessMonitorMidiMessages()
+{
+	//drain the worker thread monitor queue
+	std::deque<QueuedMidiMessage> LocalQueue;
+
+	{
+		std::lock_guard<std::mutex> Lock(MonitorMidiMutex);
+		LocalQueue.swap(MonitorMidiQueue);
+	}
+
+	for (const QueuedMidiMessage& Message : LocalQueue)
+	{
+		InputItem* Input = FindInputById(Message.InputId);
+
+		if (Input == nullptr)
+		{
+			continue;
+		}
+
+		ProcessMidiMessageForMonitor(
+			*Input,
+			Message.DeltaTime,
+			Message.Data);
+	}
+}
+
+void GlueMidi::QueueOpenMidiOutput(const int OutputIndex)
+{
+	MidiCommand Command;
+	Command.Type = EMidiCommandType::OpenOutput;
+	Command.OutputIndex = OutputIndex;
+
+	{
+		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
+		MidiCommandQueue.push_back(std::move(Command));
+	}
+
+	IncomingMidiCondition.notify_one();
+}
+
+void GlueMidi::QueueCloseMidiOutput()
+{
+	MidiCommand Command;
+	Command.Type = EMidiCommandType::CloseOutput;
+
+	{
+		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
+		MidiCommandQueue.push_back(std::move(Command));
+	}
+
+	IncomingMidiCondition.notify_one();
+}
+
+void GlueMidi::QueueOpenMidiInput(const int InputIndex)
+{
+	MidiCommand Command;
+	Command.Type = EMidiCommandType::OpenInput;
+	Command.InputIndex = InputIndex;
+
+	{
+		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
+		MidiCommandQueue.push_back(std::move(Command));
+	}
+
+	IncomingMidiCondition.notify_one();
+}
+
+void GlueMidi::QueueCloseMidiInput(const int InputIndex)
+{
+	MidiCommand Command;
+	Command.Type = EMidiCommandType::CloseInput;
+	Command.InputIndex = InputIndex;
+
+	{
+		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
+		MidiCommandQueue.push_back(std::move(Command));
+	}
+
+	IncomingMidiCondition.notify_one();
+}
+
+void GlueMidi::QueueRefreshPorts()
+{
+	MidiCommand Command;
+	Command.Type = EMidiCommandType::RefreshPorts;
+
+	{
+		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
+		MidiCommandQueue.push_back(std::move(Command));
+	}
+
+	IncomingMidiCondition.notify_one();
+}
+
+void GlueMidi::QueueReleaseMidi()
+{
+
+}
+
+bool GlueMidi::HasPendingMidiCommands()
+{
+	std::lock_guard<std::mutex> Lock(MidiCommandMutex);
+
+	return !MidiCommandQueue.empty();
+}
+
+void GlueMidi::ProcessPendingMidiCommands()
+{
+	while (true)
+	{
+		MidiCommand Command;
+
+		{
+			std::lock_guard<std::mutex> Lock(MidiCommandMutex);
+
+			if (MidiCommandQueue.empty())
+				break;
+
+			Command = std::move(MidiCommandQueue.front());
+			MidiCommandQueue.pop_front();
+		}
+
+		switch (Command.Type)
+		{
+		case EMidiCommandType::CloseOutput:
+
+			try
+			{
+				if (midiout && midiout->isPortOpen())
+				{
+					midiout->closePort();
+					CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
+					MidiOutputOpen_atomic.store(false);
+				}					
+			}
+			catch (RtMidiError& Error)
+			{
+				MidiOutputOpen_atomic.store(false, std::memory_order_release);
+				CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
+				Error.printMessage();
+			}
+
+			break;
+
+		case EMidiCommandType::OpenOutput:
+		{
+			const int Index = Command.OutputIndex;
+
+			if (!midiout)
+				return;
+
+			if (Index < 0 || Index >= static_cast<int>(MidiOutNames.size()))
+				return;
+
+			try
+			{
+				if (midiout->isPortOpen())
+					midiout->closePort();
+
+				midiout->openPort(Index, MidiOutNames[Index]);
+				CurrentOutputIndex_atomic.store(Index, std::memory_order_release);
+				MidiOutputOpen_atomic.store(true);
+					
+			}
+			catch (RtMidiError& Error)
+			{
+				MidiOutputOpen_atomic.store(false, std::memory_order_release);
+				CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
+				Error.printMessage();
+			}
+
+			break;
+		}
+		case EMidiCommandType::OpenInput:
+		{
+			openMidiInput_Internal(Command.InputIndex);
+			break;
+		}
+
+
+		case EMidiCommandType::CloseInput:
+		{
+			for (auto& ItemPtr : InputItems)
+			{
+				if (ItemPtr && ItemPtr->Index == Command.InputIndex)
+				{
+					closeMidiInput_Internal(*ItemPtr);
+					break;
+				}
+			}
+
+			break;
+		}
+
+		case EMidiCommandType::RefreshPorts:
+		{
+			refreshPorts_Internal();
+			
+			break;
+		}
+		case EMidiCommandType::ReleaseAll:
+		{
+			for (auto& Item : InputItems)
+			{
+				if (Item)
+				{
+					closeMidiInput_Internal(*Item);
+				}
+			}
+
+			if (midiout && midiout->isPortOpen())
+			{
+				midiout->closePort();
+
+				MidiOutputOpen_atomic.store(false, std::memory_order_release);
+				CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
+			}
+			break;
+		}
+
+		}
+	}	
 }
 
 void GlueMidi::Update()
 {
+	ProcessMonitorMidiMessages();
+
 	// Start ImGui frame
 	ImGui_ImplWin32_NewFrame();
 	ImGui_ImplDX11_NewFrame();
@@ -193,7 +841,7 @@ void GlueMidi::Update()
 		ImGui::SameLine();
 		if (ImGui::Button(ICON_FA_PLUG_CIRCLE_XMARK " Release All"))
 		{
-			releaseMidiPorts(inputStatus, outputStatus);
+			releaseMidiPorts();
 		}
 		ImGui::SetItemTooltip("Close any open MIDI ports so\n other programs can use them");
 
@@ -209,17 +857,21 @@ void GlueMidi::Update()
 				ImGui::Text("Inputs");
 
 				ImGui::SetNextItemWidth(-FLT_MIN);
-				if (ImGui::BeginListBox("##InputsList", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * InputItems.size() * 2.0))) {				
+				if (ImGui::BeginListBox("##InputsList", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * InputItems.size() * 2.0f))) {				
 
 					for (int i = 0; i < InputItems.size(); i++)
 					{
+						auto& Item = *InputItems[i];
+
 						ImGui::PushID(i);						
 
-						if (!InputItems[i].Muted)
+						const bool IsMuted = Item.Muted_atomic.load(std::memory_order_relaxed);
+
+						if (!IsMuted)
 						{
 							if (ImGui::Button(ICON_FA_PAUSE))
 							{
-								InputItems[i].Muted =!InputItems[i].Muted;
+								Item.Muted_atomic.store(!IsMuted, std::memory_order_relaxed);
 								
 							}
 							ImGui::SetItemTooltip("Pause output");
@@ -228,7 +880,7 @@ void GlueMidi::Update()
 						{
 							if (ImGui::Button(ICON_FA_PLAY))
 							{
-								InputItems[i].Muted = !InputItems[i].Muted;
+								Item.Muted_atomic.store(!IsMuted, std::memory_order_relaxed);
 							}
 							ImGui::SetItemTooltip("Resume output");
 						}
@@ -237,24 +889,24 @@ void GlueMidi::Update()
 
 						ImGui::SameLine();
 
-						bool selected = InputItems[i].Active;
+						bool selected = Item.Active_atomic.load();
 
-						if (ImGui::Selectable(InputItems[i].Name.c_str(), &selected))
+						if (ImGui::Selectable(Item.Name.c_str(), &selected))
 						{
 							if (selected)
 							{
-								openMidiInPort(InputItems[i].Index);
-								InputItems[i].Active = true;
-								UpdateInputsConfig(InputItems[i].Name);
-								Log((InputItems[i].Name + " OPENED").c_str());
+								QueueOpenMidiInput(Item.Index);
+								Item.Active_atomic.store(true);
+								UpdateInputsConfig(Item.Name);
+								Log((Item.Name + " OPENED").c_str());
 								SaveSettings();
 							}
 							else
 							{
-								InputItems[i].midiinput->closePort();
-								InputItems[i].Active = false;
-								UpdateInputsConfig(InputItems[i].Name, true); // remove
-								Log((InputItems[i].Name + " CLOSED").c_str());
+								QueueCloseMidiInput(Item.Index);
+								
+								UpdateInputsConfig(Item.Name, true); // remove
+								Log((Item.Name + " CLOSED").c_str());
 								SaveSettings();
 							}
 						}
@@ -276,10 +928,13 @@ void GlueMidi::Update()
 				ImGui::TextColored(outputStatusCol, outputStatus);
 				
 				// Reset this in case we've released the ports 
-				if ((midiout != nullptr) && !midiout->isPortOpen())
-				{
-					snprintf(outputStatus, 32, "Inactive");
-				}
+				const bool OutPortIsOpen =
+					MidiOutputOpen_atomic.load(std::memory_order_acquire);
+
+				snprintf(
+					outputStatus,
+					sizeof(outputStatus),
+					OutPortIsOpen ? "Active" : "Inactive");
 
 				// MIDI out listbox
 				ImGui::SetNextItemWidth(-FLT_MIN);
@@ -294,9 +949,13 @@ void GlueMidi::Update()
 						if (ImGui::Selectable((MidiOutNames[k] + "##2").c_str(), &selected))
 						{
 							MidiOutIndex = k;
-							midiout->closePort();
-							openMidiOutPort(k);
-							SetConfigString("outmidi", MidiOutNames[MidiOutIndex]);
+
+							QueueOpenMidiOutput(k);
+
+							SetConfigString(
+								"outmidi",
+								MidiOutNames[MidiOutIndex]);
+
 							SaveSettings();
 						}
 						ImGui::PopID();
@@ -549,88 +1208,99 @@ void GlueMidi::setupImGuiFonts()
 
 int GlueMidi::refreshMidiPorts()
 {
-	if (!midiin || !midiout)
+	QueueRefreshPorts();
+	return 1;
+}
+
+void GlueMidi::refreshPorts_Internal()
+{
+	for (auto& Item : InputItems)
 	{
-		try
+		if (Item)
 		{
-			midiin = new RtMidiIn();
-			midiin->setBufferSize(2048, 4);
-			midiout = new RtMidiOut();
-		}
-		catch (RtMidiError& error)
-		{
-			std::cerr << "RtMidiError: ";
-			error.printMessage();
-			Log(error.getMessage().c_str());
-			//exit(EXIT_FAILURE);
-			//return -1;
+			closeMidiInput_Internal(*Item);
 		}
 	}
-	
-	if (midiin)
-	{
-		// Close everything and flush the InputItems array. There's no advantage to keeping
-		// existing ports open, and the chance of future disaster if enumeration indices change.
-		for (auto& Item : InputItems)
-		{
-			if (Item.midiinput)
-			{
-				Item.midiinput->closePort();
-			}
-		}
-		InputItems.clear();
 
+	clearIncomingMidiQueue();
+	InputItems.clear();
+
+	MidiOutputOpen_atomic.store(false, std::memory_order_release);
+	CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
+
+
+
+	try
+	{
+		if (midiout->isPortOpen())
+		{
+			midiout->closePort();
+		}
+	}
+	catch (RtMidiError& Error)
+	{
+		Error.printMessage();
+		Log(Error.getMessage().c_str());
+	}
+
+	InPortCount = 0;
+	MidiOutNames.clear();
+
+	try
+	{
 		InPortCount = midiin->getPortCount();
 
-		for (unsigned int i = 0; i < InPortCount; i++)
+		for (unsigned int Index = 0; Index < InPortCount; ++Index)
 		{
-			std::string portName = "";
+			const std::string PortName =
+				midiin->getPortName(Index);
 
-			try
-			{
-				portName = midiin->getPortName(i);
-			}
-			catch (RtMidiError& error)
-			{
-				std::cerr << "RtMidiError: ";
-				error.printMessage();
-				Log(error.getMessage().c_str());
-				return -1;
-			}
-			
-			// Add a new InputItem and display the truncated name
-			InputItems.push_back(InputItem(this, portName, i));
-			Log(InputItems.back().Name.c_str());			
+			auto Item =
+				std::make_unique<InputItem>(
+					this,
+					PortName,
+					Index);
+
+			Item->Id = NextInputId++;
+
+			Log(Item->Name.c_str());
+
+			InputItems.push_back(std::move(Item));
 		}
 	}
-
-	if (midiout)
+	catch (RtMidiError& Error)
 	{
-		// Clear old names
-		MidiOutNames.clear();
+		Error.printMessage();
+		Log(Error.getMessage().c_str());
+		return;
+	}
 
-		// Check outputs.
-		unsigned int nPorts = midiout->getPortCount();
-		std::string portName;
-		std::cout << "\nThere are " << nPorts << " MIDI output ports available.\n";
-		for (unsigned int i = 0; i < nPorts; i++) {
-			try {
-				portName = midiout->getPortName(i);
-			}
-			catch (RtMidiError& error) {
-				error.printMessage();
-				Log(error.getMessage().c_str());
-				return -1;
-			}
-			std::cout << "  Output Port #" << i + 1 << ": " << portName << '\n';
-			// Store the name after stripping the index number, so we can compare 
-			// with devices of the same name (but possibly a different index) on 
-			// next startup.
-			std::string nameTrimmed = portName.substr(0, portName.find_last_of(' '));
-			MidiOutNames.push_back(nameTrimmed);
-			Log(nameTrimmed.c_str());
+	try
+	{
+		const unsigned int OutputPortCount =
+			midiout->getPortCount();
+
+		for (unsigned int Index = 0;
+			Index < OutputPortCount;
+			++Index)
+		{
+			const std::string PortName =
+				midiout->getPortName(Index);
+
+			const std::string TrimmedName =
+				PortName.substr(
+					0,
+					PortName.find_last_of(' '));
+
+			MidiOutNames.push_back(TrimmedName);
+			Log(TrimmedName.c_str());
 		}
-		std::cout << '\n';
+	}
+	catch (RtMidiError& Error)
+	{
+		Error.printMessage();
+		Log(Error.getMessage().c_str());
+		return;
 	}
 
 	Log("MIDI ports refreshed successfully");
@@ -638,11 +1308,8 @@ int GlueMidi::refreshMidiPorts()
 	if (settings_were_loaded)
 	{
 		reopenSavedPorts();
-
-		Log("Saved ports reopened successfully");
+		Log("Saved port reopen requested");
 	}
-
-	return 1;
 }
 
 void GlueMidi::reopenSavedPorts()
@@ -650,31 +1317,30 @@ void GlueMidi::reopenSavedPorts()
 // Attempt to open the previously used MIDI device ports.
 // Note that we copy the config array first, and don't remove any ports that
 // we don't find in the current MidiInNames. Maybe you'll plug it in next time,
-	std::vector<std::string> PrevMidiIns = GetConfigStringArray("inmidis");
+	const std::vector<std::string> PrevMidiIns = GetConfigStringArray("inmidis");
 
-	for (int p = 0; p < PrevMidiIns.size(); p++)
+	for (const auto& PrevMidi : PrevMidiIns)
 	{
 		for (auto& Item : InputItems)
 		{
-			if (Item.Name == PrevMidiIns[p])
+			if (Item->Name == PrevMidi)
 			{
-				openMidiInPort(Item.Index);
-				Item.Active = true;
-				UpdateInputsConfig(Item.Name);
-				Log((Item.Name + " OPENED").c_str());
-			}			
+				QueueOpenMidiInput(Item->Index);
+				break;
+			}
 		}
 	}
 
 
-	std::string PrevMidiOut = GetConfigString("outmidi");
+	const std::string PrevMidiOut = GetConfigString("outmidi");
 
-	for (int i = 0; i < MidiOutNames.size(); i++)
+	for (int i = 0; i < static_cast<int>(MidiOutNames.size()); ++i)
 	{
 		if (MidiOutNames[i] == PrevMidiOut)
 		{
 			MidiOutIndex = i;
-			openMidiOutPort(i);
+			QueueOpenMidiOutput(i);
+			break;
 		}
 	}
 }
@@ -721,335 +1387,152 @@ static GlueMidi* globalInstance = nullptr;
 
 static void midiInCallback(double deltatime, std::vector<unsigned char>* message, void* userData )
 {
-	globalInstance->AnimDeltaCounter += deltatime;
+	if(message == nullptr || message->empty() || userData == nullptr)
+		return;
 
-	//const char* InputName = static_cast<const char*>(userData);
-	InputItem* inputitem = static_cast<InputItem*>(userData);
+	auto* Input = static_cast<InputItem*>(userData);
 
-	if (globalInstance == nullptr)
+	if (!Input->AcceptCallbacks_atomic.load(std::memory_order_acquire))
 	{
 		return;
 	}
 
-	if (message->size() < 1)
-	{
+	if(Input->gluemidi == nullptr)
 		return;
-	}
 
-	int channel = 0;
-	int note = 0;
-	bool noteOff = false;
-	int velocity = 0;
-	int pressure = 0;
-	int program = 0;
-	int pitchbend = 0x2000;
-	int ccNum = 0;
-	int ccChan = 0;
-	int ccValue = 0;
-	bool is14bit = false;
-	int value14bit = 0;
+	const bool shouldRoute = !Input->Muted_atomic.load(std::memory_order_relaxed);
 
-	std::stringstream finalhexout;
+	Input->gluemidi->EnqueueMidiMessage(Input->Id, deltatime, shouldRoute, *message);
 
-	// https://www.hinton-instruments.co.uk/reference/midi/protocol/index.htm
-
-	int statusByte = (int)message->at(0);
-
-	switch (statusByte >> 4)
-	{
-		case 0x08:	// Note Off
-			channel = statusByte & 0x0F;
-			note = (int)message->at(1);
-			velocity = (int)message->at(2);
-			break;
-
-		case 0x09:	// Note On
-			channel = statusByte & 0x0F;
-			note = (int)message->at(1);
-			velocity = (int)message->at(2);
-			break;
-
-		case 0x0a:	// Poly aftertouch
-			channel = statusByte & 0x0F;
-			note = (int)message->at(1);
-			pressure = (int)message->at(2);
-			break;
-
-		case 0x0b:	// Control Change (or mode change)
-			channel = statusByte & 0x0F;
-			ccNum = (int)message->at(1);
-			ccValue = (int)message->at(2);
-			break;
-
-		case 0x0c:	// Program Change
-			channel = statusByte & 0x0F;
-			program = (int)message->at(1);
-			break;
-
-		case 0x0d:	// Channel aftertouch
-			channel = statusByte & 0x0F;
-			pressure = (int)message->at(1);
-			break;
-		case 0x0e:	// Pitchbend
-			channel = statusByte & 0x0F;
-			int lsb = (int)message->at(1);
-			int msb = (int)message->at(2);
-			pressure = (msb << 7) | lsb;
-			break;
-	}
-
-	// System Common
-	switch (statusByte)
-	{
-		case 0xf0:	// Sysex start
-
-			break;
-		case 0xf1:	// Quarter Frame
-
-			break;
-		case 0xf2:	// Song Position Pointer
-
-			break;
-		case 0xf3:	// Song Select
-
-			break;
-		case 0xf4:	// undefined
-
-			break;
-		case 0xf5:	// undefined
-
-			break;
-		case 0xf6:	// Tune Request
-
-			break;
-		case 0xf7:	// Sysex end
-
-			break;
-	}
-
-	// System Realtime
-	switch (statusByte)
-	{
-		case 0xf8:	// Timing clock
-			
-			break;	
-		case 0xf9:	// undefined
-
-			break;	
-		case 0xfa:	// Start
-
-			break;
-		case 0xfb:	// Continue
-
-			break;
-		case 0xfc:	// Stop
-
-			break;
-		case 0xfd:	// undefined
-
-			break;
-		case 0xfe:	// Active Sensing
-
-			break;
-		case 0xff:	// System Reset
-
-			break;
-	}
-
-
-
-	// Is this a sysex message?
-	if (((int)message->at(0) == 0xF0) && (message->size() >= 14) && !globalInstance->displayRaw)
-	{
-		std::vector<unsigned char>::iterator it = message->begin();
-
-	}
-
-	// Is this a control message status byte? Check if MSB is 0B
-	else if ((((int)message->at(0) >> 4) == 0x0b) && !globalInstance->displayRaw)
-	{
-		ccNum = (int)message->at(1);
-		ccChan = ((int)message->at(0) & 0x0F) + 1;
-		ccValue = (int)message->at(2);
-
-		is14bit = false;
-		value14bit = 0;
-		// If this CC number is equal to the last one + 32, and the channel is the same, it's 14-bit o'clock
-		if ((ccNum == (globalInstance->lastCCnum + 32)) && (ccChan == globalInstance->lastChannel))
-		{
-			is14bit = true;
-			value14bit = (globalInstance->lastCCvalue << 7) | ccValue;
-		}
-
-		// It is, so get the channel from the LSB. We add 1 for display purposes.
-		finalhexout << "Chan:" << ccChan << " ";
-
-		// Control message
-		finalhexout << "CC";
-
-		// Next byte will be CC number
-		finalhexout << ccNum;
-
-		// Then value
-		if (is14bit)
-		{
-			finalhexout << " Value 14bit: " << value14bit;
-		}
-		// Only display 7bit values if the 14bit filter is disabled
-		else
-		{
-			finalhexout << " Value 7bit: " << ccValue;
-		}
-
-		// Cache channel and CC num for later 14-bit checks
-		globalInstance->lastChannel = ccChan;
-		globalInstance->lastCCnum = ccNum;
-		globalInstance->lastCCvalue = ccValue;
-	}
-
-	// It's not CC or sysex so just display raw bytes
-	else for (auto it = message->begin(); it != message->end(); it++)
-	{
-		finalhexout << std::setfill('0') << std::setw(sizeof(char) * 2) << std::hex << int(*it) << " ";
-	}
-
-	// Always display raw bytes if filter enabled
-	if (!globalInstance->displayRaw)
-	{
-		// Die if channel filter is enabled and this doesn't match
-		if (globalInstance->filterChannel >= 1 && ccChan != globalInstance->filterChannel)
-			return;
-
-		// Die if CC filter is enabled and this doesn't match
-		if (globalInstance->filterCC >= 0 && ccNum != globalInstance->filterCC)
-			return;
-
-		// Die if this is a 7bit value but the 14-bit filter is enabled
-		if (globalInstance->filter14bit && !is14bit)
-			return;
-	}
-	
-	
-	// Is logging enabled for this input?
-	if (!inputitem->LogMute)
-	{
-		//globalInstance->Log((finalhexout.str() + +"\t" + inputitem->Name).c_str());
-	}
-
-	// Is logging soloed for this input?
-	if (!isInputEmpty(globalInstance->buf_filter))
-	{
-		std::string filterStr = normaliseString(globalInstance->buf_filter);
-		std::vector<std::string> filters = splitString(filterStr, ',');
-		
-		for (const auto& filter : filters)
-		{
-			if ((filter.size() >= 3) && partialMatchFilter(filter.c_str(), inputitem->Name))
-			{
-				globalInstance->Log((finalhexout.str() + +"\t" + inputitem->Name).c_str());
-			}
-		}
-
-		
-	}
-	else
-	{
-		// If the input filter IS empty, then we show everything
-		globalInstance->Log((finalhexout.str() + +"\t" + inputitem->Name).c_str());
-	}
-	
-	// Is this input muted?
-	if (!inputitem->Muted)
-	{
-		globalInstance->SendMessageOnPort(message, globalInstance->midiout);
-	}
-	
-
-	if (globalInstance->AnimDeltaCounter > globalInstance->AnimDeltaThreshold)
-	{
-		globalInstance->CallAnimate();
-		globalInstance->AnimDeltaCounter = 0;
-	}
 }
 
-int GlueMidi::openMidiInPort(int InIndex)
-{	
-	for (auto& Item : InputItems)
-	{
-		if (Item.Index == InIndex)
-		{
-			try
-			{
-				// Make sure our GlueMidi instance will be accessible in the callback
-				if (globalInstance == nullptr)
-				{
-					globalInstance = this;
-				}
-
-				if (Item.midiinput == nullptr)
-				{
-					Item.midiinput = std::make_unique<RtMidiIn>();
-				}
-				Item.midiinput->setCallback(midiInCallback, (void*)&Item);
-				Item.midiinput->openPort(InIndex);
-				Item.midiinput->ignoreTypes(false, true, true);
-				Item.Active = true;
-				Log(Item.Name.c_str());
-			}
-			catch (RtMidiError& error) {
-				error.printMessage();
-				Log(error.getMessage().c_str());
-				return 0;
-			}
-			
-		}
-	}
-
-	return 0;
-}
-
-
-int GlueMidi::openMidiOutPort(int OutIndex)
+void GlueMidi::openMidiInput_Internal(const int InputIndex)
 {
-	if (midiout->isPortOpen())
-		midiout->closePort();
+	if (InputIndex < 0 ||
+		InputIndex >= static_cast<int>(InputItems.size()))
+	{
+		return;
+	}
+
+	InputItem& Item = *InputItems[InputIndex];
+
+	if (!Item.midiinput)
+	{
+		Item.midiinput = std::make_unique<RtMidiIn>();
+
+		Item.midiinput->setBufferSize(2048, 4);
+	}
+
+	Item.AcceptCallbacks_atomic.store(false);
 
 	try
 	{
-		midiout->openPort(OutIndex, MidiOutNames[OutIndex]);
-		Log(MidiOutNames[OutIndex].c_str());
-		snprintf(outputStatus, 32, "Active");
-		return 1;
-	}
-	catch (RtMidiError& error) {
-		error.printMessage();
-		Log(error.getMessage().c_str());
-		snprintf(outputStatus, 32, "Inactive");
-		return 0;
-	}
+		Item.midiinput->setCallback(
+			midiInCallback,
+			&Item);
 
-	return 0;
+		Item.midiinput->ignoreTypes(false, true, true);
+
+		Item.midiinput->openPort(
+			Item.Index,
+			Item.NameIndexed);
+
+		Item.AcceptCallbacks_atomic.store(true);
+
+		Item.Active_atomic.store(true);
+
+		Log((Item.Name + " OPEN").c_str());
+	}
+	catch (RtMidiError& Error)
+	{
+		Item.AcceptCallbacks_atomic.store(false);
+
+		Error.printMessage();
+
+		Log(Error.getMessage().c_str());
+	}
 }
 
-void GlueMidi::releaseMidiPorts(char* inputStatus, char* outputStatus)
+
+
+
+void GlueMidi::closeOutput_Internal()
 {
-	for (auto& Item : InputItems)
+	try
 	{
-		if (Item.midiinput)
+		if (midiout && midiout->isPortOpen())
 		{
-			Item.midiinput->closePort();
-			Item.midiinput = nullptr;
-		}		
-		Item.Active = false;
+			midiout->closePort();
+			CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
+			MidiOutputOpen_atomic.store(false);
+		}
 	}
-	
-	if (midiout && midiout->isPortOpen())
+	catch (RtMidiError& Error)
 	{
-		midiout->closePort();
-		sprintf_s(outputStatus, 32, "Inactive");
+		MidiOutputOpen_atomic.store(false, std::memory_order_release);
+		CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
+		Error.printMessage();
+	}
+}
+
+void GlueMidi::closeMidiInput_Internal(InputItem& Input)
+{
+	Input.AcceptCallbacks_atomic.store(false, std::memory_order_release);
+
+	if (Input.midiinput)
+	{
+		try
+		{
+			Input.midiinput->cancelCallback();
+
+			if (Input.midiinput->isPortOpen())
+			{
+				Input.midiinput->closePort();
+			}
+		}
+		catch (RtMidiError& Error)
+		{
+			Error.printMessage();
+			Log(Error.getMessage().c_str());
+		}
+
+		Input.midiinput.reset();
 	}
 
-	Log("MIDI ports closed and released");
+	Input.Active_atomic.store(false);
+}
+
+void GlueMidi::releaseMidiPorts()
+{
+	{
+		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
+
+		MidiCommandQueue.emplace_back(
+			EMidiCommandType::ReleaseAll);
+	}
+
+	IncomingMidiCondition.notify_one();
+}
+
+void GlueMidi::SendMessageOnPort(const std::vector<unsigned char>* OutMsg, RtMidiOut* OutInstance)
+{
+	if (OutInstance)
+	{
+		if (OutInstance->isPortOpen())
+		{
+			try
+			{
+				OutInstance->sendMessage(OutMsg);
+			}
+			catch (RtMidiError& error)
+			{
+				std::cerr << "RtMidiError: ";
+				error.printMessage();
+				return;
+			}
+
+		}
+	}
 }
 
 void GlueMidi::Log(const char* fmt) {
