@@ -15,6 +15,17 @@
 #include <unordered_map>
 #include <windows.h>
 
+//zero padding to make the output hurt my brain less
+static std::ostream& Midi7(std::ostream& os, int value)
+{
+	return os << std::setfill('0') << std::setw(3) << value;
+}
+
+static std::ostream& Midi14(std::ostream& os, int value)
+{
+	return os << std::setfill('0') << std::setw(5) << value;
+}
+
 // Helper function to transform a string to lowercase and remove whitespace
 std::string normaliseString(const std::string& str) {
 	std::string result;
@@ -200,19 +211,19 @@ void GlueMidi::ProcessMidiMessageForMonitor(
 		break;
 
 	case 0xA0:
-		MessageTypeName = "Poly Aftertouch";
+		MessageTypeName = "Poly AT";
 		break;
 
 	case 0xB0:
-		MessageTypeName = "Control Change";
+		MessageTypeName = "CC";
 		break;
 
 	case 0xC0:
-		MessageTypeName = "Program Change";
+		MessageTypeName = "Program";
 		break;
 
 	case 0xD0:
-		MessageTypeName = "Channel Aftertouch";
+		MessageTypeName = "Chan AT";
 		break;
 
 	case 0xE0:
@@ -227,19 +238,19 @@ void GlueMidi::ProcessMidiMessageForMonitor(
 			break;
 
 		case 0xF1:
-			MessageTypeName = "MTC Quarter Frame";
+			MessageTypeName = "MTC Quarter";
 			break;
 
 		case 0xF2:
-			MessageTypeName = "Song Position";
+			MessageTypeName = "Song Pos";
 			break;
 
 		case 0xF3:
-			MessageTypeName = "Song Select";
+			MessageTypeName = "Song Sel";
 			break;
 
 		case 0xF6:
-			MessageTypeName = "Tune Request";
+			MessageTypeName = "Tune Req";
 			break;
 
 		case 0xF7:
@@ -263,11 +274,11 @@ void GlueMidi::ProcessMidiMessageForMonitor(
 			break;
 
 		case 0xFE:
-			MessageTypeName = "Active Sensing";
+			MessageTypeName = "ActiveSens";
 			break;
 
 		case 0xFF:
-			MessageTypeName = "System Reset";
+			MessageTypeName = "Sys Reset";
 			break;
 
 		default:
@@ -279,7 +290,15 @@ void GlueMidi::ProcessMidiMessageForMonitor(
 	}
 
 	std::ostringstream Output;
-	Output << '[' << MessageTypeName << "] ";
+	Output
+		<< '['
+		<< std::left
+		<< std::setfill(' ')
+		<< std::setw(12)
+		<< MessageTypeName
+		<< "] "
+		<< std::right
+		<< std::setfill('0');
 
 	bool Is14Bit = false;
 	int CCNumber = -1;
@@ -307,24 +326,28 @@ void GlueMidi::ProcessMidiMessageForMonitor(
 			const int Velocity = Message[2];
 
 			Output
-				<< "Chan:" << Channel
-				<< " Note:" << Note
-				<< " Velocity:" << Velocity;
+				<< "Ch  " << std::setfill('0') << std::setw(2) << Channel
+				<< " Note " << std::setw(3) << Note
+				<< " Velo " << std::setw(3) << Velocity;
 
 			break;
 		}
 
 		case 0xA0:
 			Output
-				<< "Chan:" << Channel
-				<< " Note:" << static_cast<int>(Message[1])
-				<< " Pressure:" << static_cast<int>(Message[2]);
+				<< "Ch  " << std::setfill('0') << std::setw(2) << Channel
+				<< " Note " << std::setw(3) << static_cast<int>(Message[1])
+				<< " Prss " << std::setw(3) << static_cast<int>(Message[2]);
 			break;
 
 		case 0xB0:
 		{
 			CCNumber = Message[1];
 			const int CCValue = Message[2];
+
+			Output
+				<< "Ch  " << std::setfill('0') << std::setw(2) << Channel
+				<< " CCNm " << std::setw(3) << CCNumber;
 
 			if (CCNumber == lastCCnum + 32 &&
 				Channel == lastChannel)
@@ -335,16 +358,12 @@ void GlueMidi::ProcessMidiMessageForMonitor(
 					(lastCCvalue << 7) | CCValue;
 
 				Output
-					<< "Chan:" << Channel
-					<< " CC:" << CCNumber
-					<< " Value 14-bit:" << Value14Bit;
+					<< " V14b " << std::setw(5) << Value14Bit;
 			}
 			else
 			{
 				Output
-					<< "Chan:" << Channel
-					<< " CC:" << CCNumber
-					<< " Value:" << CCValue;
+					<< " Valu " << std::setw(3) << CCValue;
 			}
 
 			lastChannel = Channel;
@@ -356,14 +375,14 @@ void GlueMidi::ProcessMidiMessageForMonitor(
 
 		case 0xC0:
 			Output
-				<< "Chan:" << Channel
-				<< " Program:" << static_cast<int>(Message[1]);
+				<< "Ch  " << std::setfill('0') << std::setw(2) << Channel
+				<< " Prog " << std::setw(3) << static_cast<int>(Message[1]);
 			break;
 
 		case 0xD0:
 			Output
-				<< "Chan:" << Channel
-				<< " Pressure:" << static_cast<int>(Message[1]);
+				<< "Ch  " << std::setfill('0') << std::setw(2) << Channel
+				<< " Prss " << std::setw(3) << static_cast<int>(Message[1]);
 			break;
 
 		case 0xE0:
@@ -373,8 +392,8 @@ void GlueMidi::ProcessMidiMessageForMonitor(
 				static_cast<int>(Message[1]);
 
 			Output
-				<< "Chan:" << Channel
-				<< " Value:" << PitchBend;
+				<< "Ch  " << std::setfill('0') << std::setw(2) << Channel
+				<< " Bend " << std::setw(5) << PitchBend;
 
 			break;
 		}
