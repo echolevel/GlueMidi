@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 
 #define LINEBUFFERMAX 1023
@@ -76,6 +77,15 @@ public:
 	std::string iniFileName;
 	std::unordered_map<std::string, std::string> settings_pairs;
 
+	// for restoring extant *intent* after an enumeration, so that 
+	// temporarily unplugged devices can be displayed in red text
+	// despite being disabled, then revived when rthey're plugged in
+	void ReconcileDesiredMidiState(const MidiPortUiSnapshot& Snapshot);
+	
+	std::unordered_set<std::string> PendingInputOpenNames;
+	std::string PendingOutputOpenName;
+
+	// possibly redundant now?
 	std::mutex SettingsMutex;
 
 	// Optionally sets this option to "" if it's not found
@@ -157,8 +167,6 @@ public:
 	// Flush out and renew our lists of discovered input and output MIDI ports
 	int refreshMidiPorts();
 
-	void reopenSavedPorts();
-
 	void releaseMidiPorts();
 
     // Add a log line to the log output text view
@@ -172,6 +180,9 @@ public:
 
 	void SaveSettings();
 
-	bool bSavedPortsApplied = false;
+	// Set this in UI when doing a Release All or deliberately deselecting
+	// an output, or else everything'll get forcibly reenabled from settings.
+	bool bSuppressDesiredStateReconcile = false;
+
 };
 

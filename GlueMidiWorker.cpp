@@ -464,6 +464,27 @@ void GlueMidiWorker::ProcessPendingCommands()
 
 void GlueMidiWorker::RefreshPorts_Internal()
 {
+	std::vector<InputRestoreState> InputsToRestore;
+	std::string OutputToRestore;
+
+	// snapshot the current inputs before flushing everything
+	for (const auto& Item : InputItems_)
+	{
+		if (Item && Item->Active_atomic.load(std::memory_order_acquire))
+		{
+			InputsToRestore.push_back({
+				Item->NameIndexed,
+				Item->Muted_atomic.load(std::memory_order_relaxed)
+				});
+		}
+	}
+
+	// snapshot the current output before flushing everything
+	if (OutputOpen_ && CurrentOutputIndex_ >= 0 && CurrentOutputIndex_ < static_cast<int>(OutputNames_.size()))
+	{
+		OutputToRestore = OutputNames_[CurrentOutputIndex_];
+	}
+
 	if (!MidiEnumerator_ || !MidiOutput_)
 	{
 		Log("Cannot refresh MIDI ports: RtMidi is unavailable");
@@ -539,6 +560,49 @@ void GlueMidiWorker::RefreshPorts_Internal()
 	}
 
 	Log("MIDI ports refreshed successfully");
+
+	// Now try to restore the inputs/output snapshots we captured before enumeration
+	for (const InputRestoreState& Restore : InputsToRestore)
+	{
+		for (const auto& Item : InputItems_)
+		{
+			if (Item && Item->NameIndexed == Restore.NameIndexed)
+			{
+				Item->Muted_atomic.store(Restore.Muted, std::memory_order_relaxed);
+
+				OpenInput_Internal(static_cast<int>(Item->Index));
+
+				break;
+			}
+		}
+	}
+
+	// and the output
+	if (!OutputToRestore.empty())
+	{
+		for (int Index = 0; Index < static_cast<int>(OutputNames_.size()); Index++)
+		{
+			if (OutputNames_[Index] == OutputToRestore)
+			{
+				try 
+				{
+					MidiOutput_->openPort(Index, OutputNames_[Index]);
+					CurrentOutputIndex_ = Index;
+					OutputOpen_ = true;
+				}
+				catch (const RtMidiError& Error)
+				{
+					CurrentOutputIndex_ = -1;
+					OutputOpen_ = false;
+					Error.printMessage();
+					Log(Error.getMessage());
+				}
+
+				break;
+			}
+		}
+	}
+
 	PublishSnapshot_Internal();
 }
 

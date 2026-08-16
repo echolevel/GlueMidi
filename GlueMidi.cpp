@@ -515,17 +515,12 @@ void GlueMidi::Update()
 	// access or mutation of RT-side ins/outs
 	const MidiPortUiSnapshot Snapshot = MidiWorker_ ? MidiWorker_->GetSnapshot() : MidiPortUiSnapshot{};
 
-	if (!bSavedPortsApplied && (!Snapshot.Inputs.empty() || !Snapshot.Outputs.empty()))
-	{
-		reopenSavedPorts();
-		bSavedPortsApplied = true;
-	}
+	ReconcileDesiredMidiState(Snapshot);
 
 	// Start ImGui frame
 	ImGui_ImplWin32_NewFrame();
 	ImGui_ImplDX11_NewFrame();
 	ImGui::NewFrame();
-
 
 	ImGuiViewport* viewport = ImGui::GetMainViewport();
 	ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x - 1, viewport->Pos.y));
@@ -678,9 +673,31 @@ void GlueMidi::Update()
 				
 				ImGui::Text("Inputs");
 
-				ImGui::SetNextItemWidth(-FLT_MIN);
-				if (ImGui::BeginListBox("##InputsList", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * Snapshot.Inputs.size() * 2.0f))) {				
+				// build the absent device list
+				const std::vector<std::string> DesiredInputs = GetConfigStringArray("inmidis");
 
+				std::vector<std::string> AbsentInputs;
+
+				for (const std::string& DesiredName : DesiredInputs)
+				{
+					const bool IsPresent = std::any_of(Snapshot.Inputs.begin(), Snapshot.Inputs.end(),
+						[&](const MidiInputUiState& Input)
+						{
+							return Input.Name == DesiredName;
+						});
+
+					if (!IsPresent)
+					{
+						AbsentInputs.push_back(DesiredName);
+					}
+				}
+
+				const size_t DisplayInputCount = Snapshot.Inputs.size() + AbsentInputs.size();
+
+				ImGui::SetNextItemWidth(-FLT_MIN);
+				if (ImGui::BeginListBox("##InputsList", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * DisplayInputCount * 2.0f))) {				
+
+					// Loop the inputs that are present
 					for (int i = 0; i < Snapshot.Inputs.size(); i++)
 					{
 						const MidiInputUiState& Item = Snapshot.Inputs[i];
@@ -719,18 +736,27 @@ void GlueMidi::Update()
 							{
 								if(MidiWorker_)
 								{
-									MidiWorker_->QueueOpenInput(Item.Index);
+									bSuppressDesiredStateReconcile = false;
+
 									UpdateInputsConfig(Item.Name);
-									Log(("Input: " + Item.Name + " OPENED").c_str());
+									PendingInputOpenNames.insert(Item.Name);
+
+									MidiWorker_->QueueOpenInput(Item.Index);
+
+									Log(("Input requested: " + Item.Name).c_str());
 								}
 							}
 							else
 							{
 								if (MidiWorker_)
 								{
-									MidiWorker_->QueueCloseInput(Item.Index);
 									UpdateInputsConfig(Item.Name, true); // remove
-									Log(("Input: " + Item.Name + " CLOSED").c_str());
+
+									PendingInputOpenNames.erase(Item.Name);
+
+									MidiWorker_->QueueCloseInput(Item.Index);
+									
+									Log(("Input disabled: " + Item.Name).c_str());
 								}
 							}
 
@@ -738,6 +764,40 @@ void GlueMidi::Update()
 						}
 						ImGui::PopID();
 					}
+
+					// and now loop the devices that were selected but are currently unplugged/absent
+					for (const std::string& Name : AbsentInputs)
+					{
+						ImGui::PushID(Name.c_str());
+
+						ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.25f, 0.25f, 1.0f));
+
+						const std::string Label = Name + " (not found)";
+
+						ImGui::Selectable(Label.c_str(), false);
+
+						ImGui::PopStyleColor();
+
+						if (ImGui::BeginPopupContextItem("AbsentInputMenu"))
+						{
+							if (ImGui::MenuItem("Remove"))
+							{
+								UpdateInputsConfig(Name, true);
+								PendingInputOpenNames.erase(Name);
+								SaveSettings();
+							}
+
+							ImGui::EndPopup();
+						}
+
+						if (ImGui::IsItemHovered())
+						{
+							ImGui::SetTooltip("This input is enabled in settings but is not currently connected.\nRight-click to remove it.");
+						}
+
+						ImGui::PopID();
+					}
+
 					ImGui::EndListBox();
 				}
 
@@ -758,9 +818,17 @@ void GlueMidi::Update()
 
 				ImGui::TextColored(outputStatusCol, outputStatus);
 
+				const std::string DesiredOutput = GetConfigString("outmidi");
+
+				const bool DesiredOutputPresent =
+					DesiredOutput.empty() ||
+					std::find(Snapshot.Outputs.begin(), Snapshot.Outputs.end(), DesiredOutput) != Snapshot.Outputs.end();
+
+				const size_t DisplayOutputCount = Snapshot.Outputs.size() + (!DesiredOutput.empty() && !DesiredOutputPresent ? 1 : 0);
+
 				// MIDI out listbox
 				ImGui::SetNextItemWidth(-FLT_MIN);
-				if (ImGui::BeginListBox("##outlist", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * Snapshot.Outputs.size() * 2.0f)))
+				if (ImGui::BeginListBox("##outlist", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * DisplayOutputCount * 2.0f)))
 				{
 					// MIDI out selectables
 					for (int k = 0; k < Snapshot.Outputs.size(); k++)
@@ -772,17 +840,66 @@ void GlueMidi::Update()
 						{
 							if (MidiWorker_)
 							{
-								MidiWorker_->QueueOpenOutput(k);
+								if (selected)
+								{
+									// Explicitly deselect the current output.
+									SetConfigString("outmidi", "");
+									PendingOutputOpenName.clear();
 
-								Log(("Output: " + Snapshot.Outputs[k] + " OPENED").c_str());
+									MidiWorker_->QueueCloseOutput();
 
-								SetConfigString(
-									"outmidi",
-									Snapshot.Outputs[k]);
+									Log(("Output disabled: " + Snapshot.Outputs[k]).c_str());
+								}
+								else
+								{
+									// Select a different output.
+									bSuppressDesiredStateReconcile = false;
+
+									SetConfigString("outmidi", Snapshot.Outputs[k]);
+
+									PendingOutputOpenName = Snapshot.Outputs[k];
+
+									MidiWorker_->QueueOpenOutput(k);
+
+									Log(("Output requested: " + Snapshot.Outputs[k]).c_str());
+								}
 
 								SaveSettings();
-							}
+							}							
 						}
+						ImGui::PopID();
+					}
+
+					// and now any absent/unplugged output that's saved in settings
+					if (!DesiredOutput.empty() && !DesiredOutputPresent)
+					{
+						ImGui::PushID("AbsentOutput");
+
+						ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.25f, 0.25f, 1.0f));
+
+						const std::string Label = DesiredOutput + " (not found)";
+
+						ImGui::Selectable(Label.c_str(), false);
+
+						ImGui::PopStyleColor();
+
+						if (ImGui::BeginPopupContextItem("AbsentOutputMenu"))
+						{
+							if (ImGui::MenuItem("Remove"))
+							{
+								SetConfigString("outmidi", "");
+								PendingOutputOpenName.clear();
+								SaveSettings();
+							}
+
+							ImGui::EndPopup();
+						}
+
+						if (ImGui::IsItemHovered())
+						{
+							ImGui::SetTooltip("This output is selected in settings but is not currently connected.\nRight-click to remove it.");
+						}
+						
 						ImGui::PopID();
 					}
 
@@ -1027,52 +1144,19 @@ int GlueMidi::refreshMidiPorts()
 	return 0;
 }
 
-void GlueMidi::reopenSavedPorts()
-{	
+void GlueMidi::releaseMidiPorts()
+{
 	if (!MidiWorker_)
 	{
 		return;
 	}
 
-// Attempt to open the previously used MIDI device ports.
-// Note that we copy the config array first, and don't remove any ports that
-// we don't find in the current MidiInNames. Maybe you'll plug it in next time,
+	bSuppressDesiredStateReconcile = true;
 
-	const MidiPortUiSnapshot Snapshot = MidiWorker_->GetSnapshot();
+	PendingInputOpenNames.clear();
+	PendingOutputOpenName.clear();
 
-	const std::vector<std::string> SavedInputs = GetConfigStringArray("inmidis");
-
-	for (const std::string& SavedName : SavedInputs)
-	{
-		for (const MidiInputUiState& Input : Snapshot.Inputs)
-		{
-			if (Input.Name == SavedName)
-			{
-				MidiWorker_->QueueOpenInput(Input.Index);
-				break;
-			}
-		}
-	}
-
-	const std::string SavedOutput =
-		GetConfigString("outmidi");
-
-	for (int Index = 0; Index < static_cast<int>(Snapshot.Outputs.size()); ++Index)
-	{
-		if (Snapshot.Outputs[Index] == SavedOutput)
-		{
-			MidiWorker_->QueueOpenOutput(Index);
-			break;
-		}
-	}
-}
-
-void GlueMidi::releaseMidiPorts()
-{
-	if (MidiWorker_)
-	{
-		MidiWorker_->QueueReleaseAll();
-	}
+	MidiWorker_->QueueReleaseAll();
 }
 
 void GlueMidi::Log(const char* fmt) {
@@ -1102,6 +1186,95 @@ void GlueMidi::Log(const char* fmt) {
 	}
 	
 }
+
+void GlueMidi::ReconcileDesiredMidiState(const MidiPortUiSnapshot& Snapshot)
+{	
+	if (!MidiWorker_ || bSuppressDesiredStateReconcile)
+	{
+		return;
+	}
+
+	const std::vector<std::string> DesiredInputs = GetConfigStringArray("inmidis");
+
+	// Forget pending opens for devices that are no longer present.
+	for (auto It = PendingInputOpenNames.begin(); It != PendingInputOpenNames.end();)
+	{
+		const bool IsPresent = std::any_of(Snapshot.Inputs.begin(), Snapshot.Inputs.end(),
+			[&](const MidiInputUiState& Input)
+			{
+				return Input.Name == *It;
+			});
+
+		if (!IsPresent)
+		{
+			It = PendingInputOpenNames.erase(It);
+		}
+		else
+		{
+			++It;
+		}
+	}
+
+	// check against the settings list
+	for (const MidiInputUiState& Input : Snapshot.Inputs)
+	{
+		const bool IsDesired = std::find(DesiredInputs.begin(), DesiredInputs.end(), Input.Name) != DesiredInputs.end();
+
+		if (Input.Active)
+		{
+			PendingInputOpenNames.erase(Input.Name);
+			continue;
+		}
+
+		if (IsDesired &&
+			!PendingInputOpenNames.contains(Input.Name))
+		{
+			PendingInputOpenNames.insert(Input.Name);
+			MidiWorker_->QueueOpenInput(Input.Index);
+		}
+	}
+
+
+	const std::string DesiredOutput = GetConfigString("outmidi");
+
+	bool DesiredOutputPresent = false;
+	bool DesiredOutputOpen = false;
+	int DesiredOutputIndex = -1;
+
+	// same for output
+	for (int Index = 0; Index < static_cast<int>(Snapshot.Outputs.size()); ++Index)
+	{
+		if (Snapshot.Outputs[Index] != DesiredOutput)
+		{
+			continue;
+		}
+
+		DesiredOutputPresent = true;
+		DesiredOutputIndex = Index;
+
+		DesiredOutputOpen = Snapshot.OutputOpen && Snapshot.CurrentOutputIndex == Index;
+
+		break;
+	}
+
+	if (DesiredOutputOpen)
+	{
+		PendingOutputOpenName.clear();
+	}
+	else if (!DesiredOutputPresent)
+	{
+		// Allow another open attempt if it reappears later.
+		PendingOutputOpenName.clear();
+	}
+	else if (!DesiredOutput.empty() &&
+		PendingOutputOpenName != DesiredOutput)
+	{
+		PendingOutputOpenName = DesiredOutput;
+
+		MidiWorker_->QueueOpenOutput(
+			DesiredOutputIndex);
+	}
+}	
 
 std::string GlueMidi::GetConfigString(const std::string& Key, bool CreateIfNotFound /*= false*/)
 {

@@ -97,3 +97,11 @@ struct InputState
 {
 	std::atomic<bool> Open{ false };
 };
+
+// Used to snapshot the mappings before a 
+// refresh so a restore can be attempted immediately after
+struct InputRestoreState
+{
+	std::string NameIndexed;
+	bool Muted = false;
+};
