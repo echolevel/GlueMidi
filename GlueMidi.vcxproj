@@ -155,6 +155,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="GlueMidi.cpp" />
+    <ClCompile Include="GlueMidiWorker.cpp" />
     <ClCompile Include="imgui.cpp" />
     <ClCompile Include="imgui_demo.cpp" />
     <ClCompile Include="imgui_draw.cpp" />
@@ -167,10 +168,14 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="GlueMidi.h" />
+    <ClInclude Include="GlueMidiStructs.h" />
+    <ClInclude Include="GlueMidiThemes.h" />
+    <ClInclude Include="GlueMidiWorker.h" />
     <ClInclude Include="IconsFontAwesome6.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="resource1.h" />
     <ClInclude Include="RtMidi.h" />
+    <ClInclude Include="Version.h" />
   </ItemGroup>
   <ItemGroup>
     <Font Include="fa-solid-900.ttf" />

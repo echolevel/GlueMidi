@@ -1,4 +1,6 @@
 #include "GlueMidi.h"
+#include "GlueMidiWorker.h"
+#include "Version.h"
 #include <backends/imgui_impl_win32.h>
 #include <backends/imgui_impl_dx11.h>
 #include "IconsFontAwesome6.h"
@@ -7,19 +9,11 @@
 #include <string>
 #include <sstream>
 #include <cstdlib>
+#include <iomanip>
 #include <vector>
+#include <algorithm>
 #include <unordered_map>
 #include <windows.h>
-#define __WINDOWS_MM__
-#include "RtMidi.h"
-
-template <typename T>
-void remove(std::vector<T>& vec, std::size_t pos)
-{
-	typename std::vector<T>::iterator it = vec.begin();
-	std::advance(it, pos);
-	vec.erase(it);
-}
 
 // Helper function to transform a string to lowercase and remove whitespace
 std::string normaliseString(const std::string& str) {
@@ -82,83 +76,44 @@ GlueMidi::GlueMidi(void (*func)())
 	width = 600;
 	height = 600;
 
-	MidiOutIndex = 0;
-
 	lastChannel = 0;
 	lastCCnum = 0;
 	lastCCvalue = 0;
 
-	// Preallocate to avoid heap corruption at high frequencies
+	// don't hammer reallocations while appending log lines
 	MidiLogs.reserve(LINESMAX);
 
 	// Try to read ini file
 	iniFileName = "GlueMidisettings.ini";
 	settings_were_loaded = readAppSettings(iniFileName, settings_pairs);
 
-	StartMidiThread();
+	// create the worker and start it
+	MidiWorker_ = std::make_unique<GlueMidiWorker>(
+		[this](const std::string& Message)
+		{
+			Log(Message.c_str());
+		});
+
+	MidiWorker_->Start();
+
+	MidiWorker_->QueueRefreshPorts();
 }
 
 GlueMidi::~GlueMidi()
 {
-	releaseMidiPorts();
-	StopMidiThread();
-
-	for (auto& Item : InputItems)
-	{
-		if (Item)
-		{
-			closeMidiInput_Internal(*Item);
-		}
-	}
-
-	InputItems.clear();
-
-	if (midiout)
-	{
-		try
-		{
-			if (midiout->isPortOpen())
-			{
-				midiout->closePort();
-			}
-		}
-		catch (...)
-		{
-		}
-
-		delete midiout;
-		midiout = nullptr;
-	}
-
-	delete midiin;
-	midiin = nullptr;
-}
-
-void GlueMidi::EnqueueMidiMessage(uint64_t InputId, double DeltaTime, bool ShouldRoute, const std::vector<unsigned char>& Message)
-{
-	QueuedMidiMessage Queued;
-	Queued.InputId = InputId;
-	Queued.DeltaTime = DeltaTime;
-	Queued.ShouldRoute = ShouldRoute;
-	Queued.Data = Message;
+	// Teardown is cleaner now, since StopMidiThread schedules an orderly
+	// shutdown (port closures, thread disabling, etc)
 	
+	if (MidiWorker_)
 	{
-		std::lock_guard<std::mutex> Lock(IncomingMidiMutex);
-		
-		// don't let a broken MIDI device gobble unlimited memory
-		if (IncomingMidiQueue.size() >= MaxIncomingMidiMessages)
-		{
-			IncomingMidiQueue.pop_front();
-		}
-
-		IncomingMidiQueue.push_back(std::move(Queued));
+		MidiWorker_->Stop();
+		MidiWorker_.reset();
 	}
 
-	// unblock anything that's waiting on this
-	IncomingMidiCondition.notify_one();
+	// midiin/midiout now created and destroyed on the worker thread
 }
 
-void GlueMidi::ProcessMidiMessageForMonitor(InputItem& Input, double deltatime, const std::vector<unsigned char>& message)
+void GlueMidi::ProcessMidiMessageForMonitor(const MidiInputUiState& Input, double deltatime, const std::vector<unsigned char>& message)
 {
 	AnimDeltaCounter += deltatime;
 
@@ -301,8 +256,6 @@ void GlueMidi::ProcessMidiMessageForMonitor(InputItem& Input, double deltatime, 
 		break;
 	}
 
-
-
 	// Is this a sysex message?
  	if (((int)message.at(0) == 0xF0) && (message.size() >= 14) && !displayRaw)
  	{
@@ -321,9 +274,6 @@ void GlueMidi::ProcessMidiMessageForMonitor(InputItem& Input, double deltatime, 
 		}
  	}
 
-
-
-
 	// Is this a control message status byte? Check if MSB is 0B
 	else if ((((int)message.at(0) >> 4) == 0x0b) && !displayRaw)
 	{
@@ -333,7 +283,7 @@ void GlueMidi::ProcessMidiMessageForMonitor(InputItem& Input, double deltatime, 
 
 		is14bit = false;
 		value14bit = 0;
-		// If this CC number is equal to the last one + 32, and the channel is the same, it's 14-bit o'clock
+		// If this CC number is equal to the last one + 32, and the channel is the same, it's 14-bit o'clock!
 		if ((ccNum == (lastCCnum + 32)) && (ccChan == lastChannel))
 		{
 			is14bit = true;
@@ -378,15 +328,13 @@ void GlueMidi::ProcessMidiMessageForMonitor(InputItem& Input, double deltatime, 
 	if (!displayRaw)
 	{
 		// Die if channel filter is enabled and this doesn't match
-		if (filterChannel >= 1 &&
-			(!isCC || ccChan != filterChannel))
+		if (filterChannel >= 1 && (!isCC || ccChan != filterChannel))
 		{
 			return;
 		}
 
 		// Die if CC filter is enabled and this doesn't match
-		if (filterCC >= 0 &&
-			(!isCC || ccNum != filterCC))
+		if (filterCC >= 0 && (!isCC || ccNum != filterCC))
 		{
 			return;
 		}
@@ -405,8 +353,7 @@ void GlueMidi::ProcessMidiMessageForMonitor(InputItem& Input, double deltatime, 
 		if (!isInputEmpty(buf_filter))
 		{
 			const std::string filterStr = normaliseString(buf_filter);
-			const std::vector<std::string> filters =
-				splitString(filterStr, ',');
+			const std::vector<std::string> filters = splitString(filterStr, ',');
 
 			for (const std::string& filter : filters)
 			{
@@ -431,325 +378,54 @@ void GlueMidi::ProcessMidiMessageForMonitor(InputItem& Input, double deltatime, 
  	}
 }
 
-InputItem* GlueMidi::FindInputById(uint64_t InputId)
-{
-	for (auto& ItemPtr : InputItems)
-	{
-		if (ItemPtr && ItemPtr->Id == InputId)
-		{
-			return ItemPtr.get();
-		}
-	}
-
-	return nullptr;
-}
-
-void GlueMidi::StartMidiThread()
-{
-	if (MidiThreadRunning_atomic.exchange(true))
-	{
-		return;
-	}
-
-	MidiThread = std::thread(&GlueMidi::MidiThreadMain, this);
-}
-
-void GlueMidi::StopMidiThread()
-{
-	if (!MidiThreadRunning_atomic.exchange(false))
-	{
-		return;
-	}
-
-	IncomingMidiCondition.notify_all();
-
-	if (MidiThread.joinable())
-	{
-		MidiThread.join();
-	}
-}
-
-void GlueMidi::MidiThreadMain()
-{
-	// Main worker thread loop
-	while (MidiThreadRunning_atomic.load(std::memory_order_acquire))
-	{
-		{
-			std::unique_lock<std::mutex> Lock(IncomingMidiMutex);
-
-			IncomingMidiCondition.wait(
-				Lock,
-				[this]
-				{
-					return
-						!MidiThreadRunning_atomic.load(std::memory_order_acquire)
-						|| !IncomingMidiQueue.empty()
-						|| HasPendingMidiCommands();
-				});
-		}
-
-		if (!MidiThreadRunning_atomic.load(std::memory_order_acquire))
-			break;
-
-		ProcessPendingMidiCommands();
-
-		// Then drain every queued MIDI message
-		while (true)
-		{
-			QueuedMidiMessage Message;
-
-			{
-				std::lock_guard<std::mutex> Lock(IncomingMidiMutex);
-
-				if (IncomingMidiQueue.empty())
-					break;
-
-				Message = std::move(IncomingMidiQueue.front());
-				IncomingMidiQueue.pop_front();
-			}
-
-			if (Message.ShouldRoute)
-			{
-				SendMessageOnPort(&Message.Data, midiout);
-			}
-
-			{
-				std::lock_guard<std::mutex> Lock(MonitorMidiMutex);
-				MonitorMidiQueue.push_back(std::move(Message));
-			}
-		}
-	}
-
-	
-}
-
 void GlueMidi::ProcessMonitorMidiMessages()
 {
-	//drain the worker thread monitor queue
-	std::deque<QueuedMidiMessage> LocalQueue;
-
+	if (!MidiWorker_)
 	{
-		std::lock_guard<std::mutex> Lock(MonitorMidiMutex);
-		LocalQueue.swap(MonitorMidiQueue);
+		return;
 	}
 
-	for (const QueuedMidiMessage& Message : LocalQueue)
+	//drain the worker thread monitor queue
+	std::vector<QueuedMidiMessage> Messages = MidiWorker_->DrainMonitorMessages();
+
+	const MidiPortUiSnapshot Snapshot = MidiWorker_->GetSnapshot();
+
+	for (const QueuedMidiMessage& Message : Messages)
 	{
-		InputItem* Input = FindInputById(Message.InputId);
+		const MidiInputUiState* Input = nullptr;
+
+		for (const MidiInputUiState& Candidate :
+			Snapshot.Inputs)
+		{
+			if (Candidate.Id == Message.InputId)
+			{
+				Input = &Candidate;
+				break;
+			}
+		}
 
 		if (Input == nullptr)
 		{
 			continue;
 		}
 
-		ProcessMidiMessageForMonitor(
-			*Input,
-			Message.DeltaTime,
-			Message.Data);
+		ProcessMidiMessageForMonitor(*Input, Message.DeltaTime, Message.Data);
 	}
-}
-
-void GlueMidi::QueueOpenMidiOutput(const int OutputIndex)
-{
-	MidiCommand Command;
-	Command.Type = EMidiCommandType::OpenOutput;
-	Command.OutputIndex = OutputIndex;
-
-	{
-		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
-		MidiCommandQueue.push_back(std::move(Command));
-	}
-
-	IncomingMidiCondition.notify_one();
-}
-
-void GlueMidi::QueueCloseMidiOutput()
-{
-	MidiCommand Command;
-	Command.Type = EMidiCommandType::CloseOutput;
-
-	{
-		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
-		MidiCommandQueue.push_back(std::move(Command));
-	}
-
-	IncomingMidiCondition.notify_one();
-}
-
-void GlueMidi::QueueOpenMidiInput(const int InputIndex)
-{
-	MidiCommand Command;
-	Command.Type = EMidiCommandType::OpenInput;
-	Command.InputIndex = InputIndex;
-
-	{
-		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
-		MidiCommandQueue.push_back(std::move(Command));
-	}
-
-	IncomingMidiCondition.notify_one();
-}
-
-void GlueMidi::QueueCloseMidiInput(const int InputIndex)
-{
-	MidiCommand Command;
-	Command.Type = EMidiCommandType::CloseInput;
-	Command.InputIndex = InputIndex;
-
-	{
-		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
-		MidiCommandQueue.push_back(std::move(Command));
-	}
-
-	IncomingMidiCondition.notify_one();
-}
-
-void GlueMidi::QueueRefreshPorts()
-{
-	MidiCommand Command;
-	Command.Type = EMidiCommandType::RefreshPorts;
-
-	{
-		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
-		MidiCommandQueue.push_back(std::move(Command));
-	}
-
-	IncomingMidiCondition.notify_one();
-}
-
-void GlueMidi::QueueReleaseMidi()
-{
-
-}
-
-bool GlueMidi::HasPendingMidiCommands()
-{
-	std::lock_guard<std::mutex> Lock(MidiCommandMutex);
-
-	return !MidiCommandQueue.empty();
-}
-
-void GlueMidi::ProcessPendingMidiCommands()
-{
-	while (true)
-	{
-		MidiCommand Command;
-
-		{
-			std::lock_guard<std::mutex> Lock(MidiCommandMutex);
-
-			if (MidiCommandQueue.empty())
-				break;
-
-			Command = std::move(MidiCommandQueue.front());
-			MidiCommandQueue.pop_front();
-		}
-
-		switch (Command.Type)
-		{
-		case EMidiCommandType::CloseOutput:
-
-			try
-			{
-				if (midiout && midiout->isPortOpen())
-				{
-					midiout->closePort();
-					CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
-					MidiOutputOpen_atomic.store(false);
-				}					
-			}
-			catch (RtMidiError& Error)
-			{
-				MidiOutputOpen_atomic.store(false, std::memory_order_release);
-				CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
-				Error.printMessage();
-			}
-
-			break;
-
-		case EMidiCommandType::OpenOutput:
-		{
-			const int Index = Command.OutputIndex;
-
-			if (!midiout)
-				return;
-
-			if (Index < 0 || Index >= static_cast<int>(MidiOutNames.size()))
-				return;
-
-			try
-			{
-				if (midiout->isPortOpen())
-					midiout->closePort();
-
-				midiout->openPort(Index, MidiOutNames[Index]);
-				CurrentOutputIndex_atomic.store(Index, std::memory_order_release);
-				MidiOutputOpen_atomic.store(true);
-					
-			}
-			catch (RtMidiError& Error)
-			{
-				MidiOutputOpen_atomic.store(false, std::memory_order_release);
-				CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
-				Error.printMessage();
-			}
-
-			break;
-		}
-		case EMidiCommandType::OpenInput:
-		{
-			openMidiInput_Internal(Command.InputIndex);
-			break;
-		}
-
-
-		case EMidiCommandType::CloseInput:
-		{
-			for (auto& ItemPtr : InputItems)
-			{
-				if (ItemPtr && ItemPtr->Index == Command.InputIndex)
-				{
-					closeMidiInput_Internal(*ItemPtr);
-					break;
-				}
-			}
-
-			break;
-		}
-
-		case EMidiCommandType::RefreshPorts:
-		{
-			refreshPorts_Internal();
-			
-			break;
-		}
-		case EMidiCommandType::ReleaseAll:
-		{
-			for (auto& Item : InputItems)
-			{
-				if (Item)
-				{
-					closeMidiInput_Internal(*Item);
-				}
-			}
-
-			if (midiout && midiout->isPortOpen())
-			{
-				midiout->closePort();
-
-				MidiOutputOpen_atomic.store(false, std::memory_order_release);
-				CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
-			}
-			break;
-		}
-
-		}
-	}	
 }
 
 void GlueMidi::Update()
 {
 	ProcessMonitorMidiMessages();
+
+	// ONLY use the inpyuts and outputs in Snapshot for UI stuff - no direct
+	// access or mutation of RT-side ins/outs
+	const MidiPortUiSnapshot Snapshot = MidiWorker_ ? MidiWorker_->GetSnapshot() : MidiPortUiSnapshot{};
+
+	if (!bSavedPortsApplied && (!Snapshot.Inputs.empty() || !Snapshot.Outputs.empty()))
+	{
+		reopenSavedPorts();
+		bSavedPortsApplied = true;
+	}
 
 	// Start ImGui frame
 	ImGui_ImplWin32_NewFrame();
@@ -762,13 +438,13 @@ void GlueMidi::Update()
 	//ImGui::SetNextWindowSize(ImVec2(width, height));
 	ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
 
-	
 	if (ImGui::Begin("##GlueMidi", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoTitleBar))
 	{
 		// Keep these updated for saving on close		
 		width = (int)ImGui::GetWindowWidth();
 		height = (int)ImGui::GetWindowHeight();
 
+		bool OpenAboutPopup = false;
 
 		if (ImGui::BeginMenuBar())
 		{
@@ -800,35 +476,87 @@ void GlueMidi::Update()
 					SaveSettings();
 				}
 
+				if (ImGui::BeginMenu("Theme"))
+				{
+					if (ImGui::MenuItem("Fader3"))
+					{
+						Fader3ImGuiStyle();
+					}
+
+					if (ImGui::MenuItem("VisualStudio"))
+					{
+						SetupImGuiStyle();
+					}
+
+					if (ImGui::MenuItem("Bess Dark"))
+					{
+						SetBessTheme();
+					}
+
+					if (ImGui::MenuItem("ImGui Dark"))
+					{
+						ImGui::StyleColorsDark();
+					}
+
+					ImGui::EndMenu();
+				}
+
 				ImGui::EndMenu();
 			}
 
-			if (ImGui::BeginMenu("Theme"))
+			if (ImGui::BeginMenu("Help"))
 			{
-				if (ImGui::MenuItem("Fader3"))
-				{
-					Fader3ImGuiStyle();
-				}
-
-				if (ImGui::MenuItem("VisualStudio"))
-				{
-					SetupImGuiStyle();
-				}
-
-				if (ImGui::MenuItem("Bess Dark"))
-				{
-					SetBessTheme();
-				}
-
-				if (ImGui::MenuItem("ImGui Dark"))
-				{
-					ImGui::StyleColorsDark();
+				if (ImGui::MenuItem("About..."))
+				{					
+					OpenAboutPopup = true;
 				}
 
 				ImGui::EndMenu();
 			}
-
+			
 			ImGui::EndMenuBar();
+		}
+
+		if (OpenAboutPopup)
+		{
+			ImGui::OpenPopup("About");
+		}
+
+		ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+		ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+		if (ImGui::BeginPopupModal("About", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+		{
+			ImGui::Text("GlueMidi %s", GLUEMIDI_VERSION_STRING);
+
+			ImGui::Separator();
+
+			ImGui::PushTextWrapPos(ImGui::GetMainViewport()->Size.x - 20.f);
+
+			ImGui::TextUnformatted("GlueMidi is a lightweight MIDI utility for Windows, designed "  
+						"to allow simple 'many to one' routing of MIDI messages between "
+						"virtual and hardware devices.\n\n"
+						"It supports multiple simultaneous MIDI inputs, a single selectable "
+						"MIDI output, live message monitoring with filtering, automatic device "
+						"reconnection, hot-plug detection, and automatic saving/loading of your "
+						"routing map. \n\n"
+						"It's designed to be robust against unreliable drivers, though further "
+						"stability improvements are in the pipeline.\n\n");
+
+			ImGui::Separator();
+
+			ImGui::TextUnformatted("GlueMidi is open source and released under the MIT license:\n"
+						"https://github.com/echolevel/GlueMidi\n\n"
+						"Copyright (c) 2026 Brendan O'Callaghan Ratliff"
+						);
+
+			ImGui::PopTextWrapPos();
+
+			if (ImGui::Button("Close"))
+			{
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
 		}
 
 
@@ -857,22 +585,21 @@ void GlueMidi::Update()
 				ImGui::Text("Inputs");
 
 				ImGui::SetNextItemWidth(-FLT_MIN);
-				if (ImGui::BeginListBox("##InputsList", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * InputItems.size() * 2.0f))) {				
+				if (ImGui::BeginListBox("##InputsList", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * Snapshot.Inputs.size() * 2.0f))) {				
 
-					for (int i = 0; i < InputItems.size(); i++)
+					for (int i = 0; i < Snapshot.Inputs.size(); i++)
 					{
-						auto& Item = *InputItems[i];
+						const MidiInputUiState& Item = Snapshot.Inputs[i];
 
 						ImGui::PushID(i);						
 
-						const bool IsMuted = Item.Muted_atomic.load(std::memory_order_relaxed);
-
-						if (!IsMuted)
+						
+						if (!Item.Muted)
 						{
 							if (ImGui::Button(ICON_FA_PAUSE))
 							{
-								Item.Muted_atomic.store(!IsMuted, std::memory_order_relaxed);
-								
+								if(MidiWorker_)
+									MidiWorker_->QueueSetInputMuted(Item.Index, true);
 							}
 							ImGui::SetItemTooltip("Pause output");
 						}
@@ -880,7 +607,8 @@ void GlueMidi::Update()
 						{
 							if (ImGui::Button(ICON_FA_PLAY))
 							{
-								Item.Muted_atomic.store(!IsMuted, std::memory_order_relaxed);
+								if(MidiWorker_)
+									MidiWorker_->QueueSetInputMuted(Item.Index, false);
 							}
 							ImGui::SetItemTooltip("Resume output");
 						}
@@ -889,26 +617,30 @@ void GlueMidi::Update()
 
 						ImGui::SameLine();
 
-						bool selected = Item.Active_atomic.load();
+						bool selected = Item.Active;
 
 						if (ImGui::Selectable(Item.Name.c_str(), &selected))
 						{
 							if (selected)
 							{
-								QueueOpenMidiInput(Item.Index);
-								Item.Active_atomic.store(true);
-								UpdateInputsConfig(Item.Name);
-								Log((Item.Name + " OPENED").c_str());
-								SaveSettings();
+								if(MidiWorker_)
+								{
+									MidiWorker_->QueueOpenInput(Item.Index);
+									UpdateInputsConfig(Item.Name);
+									Log(("Input: " + Item.Name + " OPENED").c_str());
+								}
 							}
 							else
 							{
-								QueueCloseMidiInput(Item.Index);
-								
-								UpdateInputsConfig(Item.Name, true); // remove
-								Log((Item.Name + " CLOSED").c_str());
-								SaveSettings();
+								if (MidiWorker_)
+								{
+									MidiWorker_->QueueCloseInput(Item.Index);
+									UpdateInputsConfig(Item.Name, true); // remove
+									Log(("Input: " + Item.Name + " CLOSED").c_str());
+								}
 							}
+
+							SaveSettings();
 						}
 						ImGui::PopID();
 					}
@@ -925,38 +657,37 @@ void GlueMidi::Update()
 				ImGui::Text("Output");
 				ImGui::SameLine();
 				
-				ImGui::TextColored(outputStatusCol, outputStatus);
-				
-				// Reset this in case we've released the ports 
-				const bool OutPortIsOpen =
-					MidiOutputOpen_atomic.load(std::memory_order_acquire);
-
 				snprintf(
 					outputStatus,
 					sizeof(outputStatus),
-					OutPortIsOpen ? "Active" : "Inactive");
+					Snapshot.OutputOpen ? "Active" : "Inactive");
+
+				ImGui::TextColored(outputStatusCol, outputStatus);
 
 				// MIDI out listbox
 				ImGui::SetNextItemWidth(-FLT_MIN);
-				if (ImGui::BeginListBox("##outlist", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * MidiOutNames.size() * 2.0)))
+				if (ImGui::BeginListBox("##outlist", ImVec2(-1, (ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y) * Snapshot.Outputs.size() * 2.0f)))
 				{
 					// MIDI out selectables
-					for (int k = 0; k < MidiOutNames.size(); k++)
+					for (int k = 0; k < Snapshot.Outputs.size(); k++)
 					{
 						ImGui::PushID(k);
-						bool selected = MidiOutIndex == k;
+						const bool selected = Snapshot.OutputOpen && Snapshot.CurrentOutputIndex == k;
 
-						if (ImGui::Selectable((MidiOutNames[k] + "##2").c_str(), &selected))
+						if (ImGui::Selectable((Snapshot.Outputs[k]).c_str(), selected))
 						{
-							MidiOutIndex = k;
+							if (MidiWorker_)
+							{
+								MidiWorker_->QueueOpenOutput(k);
 
-							QueueOpenMidiOutput(k);
+								Log(("Output: " + Snapshot.Outputs[k] + " OPENED").c_str());
 
-							SetConfigString(
-								"outmidi",
-								MidiOutNames[MidiOutIndex]);
+								SetConfigString(
+									"outmidi",
+									Snapshot.Outputs[k]);
 
-							SaveSettings();
+								SaveSettings();
+							}
 						}
 						ImGui::PopID();
 					}
@@ -1020,7 +751,7 @@ void GlueMidi::Update()
 		ImGui::SameLine();
 		ImGuiInputTextFlags InTextFlags = ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_AutoSelectAll;
 
-		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0);
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
 		ImGui::InputText("##FilterInput", buf_filter, 32, InTextFlags);
 		ImGui::SetItemTooltip("Filter Input names with 3 or more matching characters.\nUse ',' to separate multiple filters.\nEmpty filter logs all inputs.");
 		
@@ -1037,12 +768,19 @@ void GlueMidi::Update()
 		
 		static ImGuiInputTextFlags flags = ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoHorizontalScroll;
 
+		std::vector<std::string> LocalMidiLogs;
+
+		{
+			std::lock_guard<std::mutex> Lock(midiLogMutex);
+			LocalMidiLogs = MidiLogs;
+		}
+
 		std::string multilines;
-		for (int i = (int)MidiLogs.size() - 1; i > 0; i--)
+		for (int i = (int)LocalMidiLogs.size() - 1; i > 0; i--)
 		{
 			if (i >= LINESMAX) continue;
 
-			multilines += MidiLogs[i] + '\n';
+			multilines += LocalMidiLogs[i] + '\n';
 		};
 
 		static std::vector<char> multibuffer;
@@ -1148,45 +886,9 @@ bool GlueMidi::readAppSettings(const std::string& fileName, std::unordered_map<s
 		std::cerr << "Failed to open file for reading!" << std::endl;
 		return false;
 	}
-	file.close();
 
 	return false;
 }
-
-
-bool GlueMidi::findConfigValue(const std::string keyname, std::unordered_map<std::string, std::string>& configPairsLoading, int* outputint /*= nullptr*/, std::string* outputstring /*= nullptr*/)
-{
-	if (configPairsLoading.find(keyname) != configPairsLoading.end())
-	{
-		try
-		{
-			if (outputint != nullptr)
-			{
-				// Only overwrite output if we find a valid keyname
-				*outputint = std::stoi(configPairsLoading[keyname]);
-			}
-			if (outputstring != nullptr)
-			{
-				// Only overwrite output if we find a valid keyname
-				*outputstring = configPairsLoading[keyname];
-			}
-
-			return true;
-		}
-		catch (const std::invalid_argument& e)
-		{
-			std::cerr << "Invalid argument: " << e.what() << std::endl;
-			return false;
-		}
-		catch (const std::out_of_range& e) {
-			std::cerr << "Out of range: " << e.what() << std::endl;
-			return false;
-		}
-
-	}
-	return false;
-}
-
 
 
 void GlueMidi::setupImGuiFonts()
@@ -1208,330 +910,60 @@ void GlueMidi::setupImGuiFonts()
 
 int GlueMidi::refreshMidiPorts()
 {
-	QueueRefreshPorts();
-	return 1;
-}
-
-void GlueMidi::refreshPorts_Internal()
-{
-	for (auto& Item : InputItems)
+	if (MidiWorker_)
 	{
-		if (Item)
-		{
-			closeMidiInput_Internal(*Item);
-		}
+		MidiWorker_->QueueRefreshPorts();
+		return 1;
 	}
 
-	clearIncomingMidiQueue();
-	InputItems.clear();
-
-	MidiOutputOpen_atomic.store(false, std::memory_order_release);
-	CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
-
-
-
-	try
-	{
-		if (midiout->isPortOpen())
-		{
-			midiout->closePort();
-		}
-	}
-	catch (RtMidiError& Error)
-	{
-		Error.printMessage();
-		Log(Error.getMessage().c_str());
-	}
-
-	InPortCount = 0;
-	MidiOutNames.clear();
-
-	try
-	{
-		InPortCount = midiin->getPortCount();
-
-		for (unsigned int Index = 0; Index < InPortCount; ++Index)
-		{
-			const std::string PortName =
-				midiin->getPortName(Index);
-
-			auto Item =
-				std::make_unique<InputItem>(
-					this,
-					PortName,
-					Index);
-
-			Item->Id = NextInputId++;
-
-			Log(Item->Name.c_str());
-
-			InputItems.push_back(std::move(Item));
-		}
-	}
-	catch (RtMidiError& Error)
-	{
-		Error.printMessage();
-		Log(Error.getMessage().c_str());
-		return;
-	}
-
-	try
-	{
-		const unsigned int OutputPortCount =
-			midiout->getPortCount();
-
-		for (unsigned int Index = 0;
-			Index < OutputPortCount;
-			++Index)
-		{
-			const std::string PortName =
-				midiout->getPortName(Index);
-
-			const std::string TrimmedName =
-				PortName.substr(
-					0,
-					PortName.find_last_of(' '));
-
-			MidiOutNames.push_back(TrimmedName);
-			Log(TrimmedName.c_str());
-		}
-	}
-	catch (RtMidiError& Error)
-	{
-		Error.printMessage();
-		Log(Error.getMessage().c_str());
-		return;
-	}
-
-	Log("MIDI ports refreshed successfully");
-
-	if (settings_were_loaded)
-	{
-		reopenSavedPorts();
-		Log("Saved port reopen requested");
-	}
+	return 0;
 }
 
 void GlueMidi::reopenSavedPorts()
 {	
+	if (!MidiWorker_)
+	{
+		return;
+	}
+
 // Attempt to open the previously used MIDI device ports.
 // Note that we copy the config array first, and don't remove any ports that
 // we don't find in the current MidiInNames. Maybe you'll plug it in next time,
-	const std::vector<std::string> PrevMidiIns = GetConfigStringArray("inmidis");
 
-	for (const auto& PrevMidi : PrevMidiIns)
+	const MidiPortUiSnapshot Snapshot = MidiWorker_->GetSnapshot();
+
+	const std::vector<std::string> SavedInputs = GetConfigStringArray("inmidis");
+
+	for (const std::string& SavedName : SavedInputs)
 	{
-		for (auto& Item : InputItems)
+		for (const MidiInputUiState& Input : Snapshot.Inputs)
 		{
-			if (Item->Name == PrevMidi)
+			if (Input.Name == SavedName)
 			{
-				QueueOpenMidiInput(Item->Index);
+				MidiWorker_->QueueOpenInput(Input.Index);
 				break;
 			}
 		}
 	}
 
+	const std::string SavedOutput =
+		GetConfigString("outmidi");
 
-	const std::string PrevMidiOut = GetConfigString("outmidi");
-
-	for (int i = 0; i < static_cast<int>(MidiOutNames.size()); ++i)
+	for (int Index = 0; Index < static_cast<int>(Snapshot.Outputs.size()); ++Index)
 	{
-		if (MidiOutNames[i] == PrevMidiOut)
+		if (Snapshot.Outputs[Index] == SavedOutput)
 		{
-			MidiOutIndex = i;
-			QueueOpenMidiOutput(i);
+			MidiWorker_->QueueOpenOutput(Index);
 			break;
 		}
 	}
 }
 
-bool GlueMidi::portCountHasChanged()
-{
-	if (!midiin)
-	{
-		try
-		{
-			midiin = new RtMidiIn();
-			midiin->setBufferSize(2048, 4);
-			midiout = new RtMidiOut();
-		}
-		catch (RtMidiError& error)
-		{
-			std::cerr << "RtMidiError: ";
-			error.printMessage();
-			Log(error.getMessage().c_str());
-			//exit(EXIT_FAILURE);
-			return false;
-		}
-	}
-
-	if (midiin)
-	{
-		// All we want to do is see if the number of ports has changed
-
-		unsigned int nPorts = midiin->getPortCount();
-
-		if (midiin->getPortCount() != InPortCount)
-		{
-			return true;
-		}		
-	}
-
-	return false;
-}
-
-// We need to use a static var for the main GlueMidi instance because it's for some reason 
-// impossible to pass RtMidi our callback function when it's a member of a class, and I 
-// couldn't get it to work as a lambda either.
-static GlueMidi* globalInstance = nullptr;
-
-static void midiInCallback(double deltatime, std::vector<unsigned char>* message, void* userData )
-{
-	if(message == nullptr || message->empty() || userData == nullptr)
-		return;
-
-	auto* Input = static_cast<InputItem*>(userData);
-
-	if (!Input->AcceptCallbacks_atomic.load(std::memory_order_acquire))
-	{
-		return;
-	}
-
-	if(Input->gluemidi == nullptr)
-		return;
-
-	const bool shouldRoute = !Input->Muted_atomic.load(std::memory_order_relaxed);
-
-	Input->gluemidi->EnqueueMidiMessage(Input->Id, deltatime, shouldRoute, *message);
-
-}
-
-void GlueMidi::openMidiInput_Internal(const int InputIndex)
-{
-	if (InputIndex < 0 ||
-		InputIndex >= static_cast<int>(InputItems.size()))
-	{
-		return;
-	}
-
-	InputItem& Item = *InputItems[InputIndex];
-
-	if (!Item.midiinput)
-	{
-		Item.midiinput = std::make_unique<RtMidiIn>();
-
-		Item.midiinput->setBufferSize(2048, 4);
-	}
-
-	Item.AcceptCallbacks_atomic.store(false);
-
-	try
-	{
-		Item.midiinput->setCallback(
-			midiInCallback,
-			&Item);
-
-		Item.midiinput->ignoreTypes(false, true, true);
-
-		Item.midiinput->openPort(
-			Item.Index,
-			Item.NameIndexed);
-
-		Item.AcceptCallbacks_atomic.store(true);
-
-		Item.Active_atomic.store(true);
-
-		Log((Item.Name + " OPEN").c_str());
-	}
-	catch (RtMidiError& Error)
-	{
-		Item.AcceptCallbacks_atomic.store(false);
-
-		Error.printMessage();
-
-		Log(Error.getMessage().c_str());
-	}
-}
-
-
-
-
-void GlueMidi::closeOutput_Internal()
-{
-	try
-	{
-		if (midiout && midiout->isPortOpen())
-		{
-			midiout->closePort();
-			CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
-			MidiOutputOpen_atomic.store(false);
-		}
-	}
-	catch (RtMidiError& Error)
-	{
-		MidiOutputOpen_atomic.store(false, std::memory_order_release);
-		CurrentOutputIndex_atomic.store(-1, std::memory_order_release);
-		Error.printMessage();
-	}
-}
-
-void GlueMidi::closeMidiInput_Internal(InputItem& Input)
-{
-	Input.AcceptCallbacks_atomic.store(false, std::memory_order_release);
-
-	if (Input.midiinput)
-	{
-		try
-		{
-			Input.midiinput->cancelCallback();
-
-			if (Input.midiinput->isPortOpen())
-			{
-				Input.midiinput->closePort();
-			}
-		}
-		catch (RtMidiError& Error)
-		{
-			Error.printMessage();
-			Log(Error.getMessage().c_str());
-		}
-
-		Input.midiinput.reset();
-	}
-
-	Input.Active_atomic.store(false);
-}
-
 void GlueMidi::releaseMidiPorts()
 {
+	if (MidiWorker_)
 	{
-		std::lock_guard<std::mutex> Lock(MidiCommandMutex);
-
-		MidiCommandQueue.emplace_back(
-			EMidiCommandType::ReleaseAll);
-	}
-
-	IncomingMidiCondition.notify_one();
-}
-
-void GlueMidi::SendMessageOnPort(const std::vector<unsigned char>* OutMsg, RtMidiOut* OutInstance)
-{
-	if (OutInstance)
-	{
-		if (OutInstance->isPortOpen())
-		{
-			try
-			{
-				OutInstance->sendMessage(OutMsg);
-			}
-			catch (RtMidiError& error)
-			{
-				std::cerr << "RtMidiError: ";
-				error.printMessage();
-				return;
-			}
-
-		}
+		MidiWorker_->QueueReleaseAll();
 	}
 }
 
@@ -1546,21 +978,215 @@ void GlueMidi::Log(const char* fmt) {
 		<< std::setfill('0') << std::setw(2) << localTime.tm_min << ":"
 		<< std::setfill('0') << std::setw(2) << localTime.tm_sec << "] ";
 
-	std::string timestampedFmt = timestamp.str() + fmt;
+	const std::string Line = timestamp.str() + fmt;
 
-	char buffer[LINEBUFFERMAX];
-	snprintf(buffer, sizeof(buffer), "%s", timestampedFmt.c_str());
-	buffer[sizeof(buffer) - 1] = 0; // Ensure null-termination
-	MidiLogs.push_back(buffer);
+	std::lock_guard<std::mutex> Lock(midiLogMutex);
 
+	MidiLogs.push_back(Line);
 
-
-	// Lose surplus lines
-	std::lock_guard<std::mutex> lock(midiLogMutex);
 	if (MidiLogs.size() > LINESMAX)
 	{
-		size_t excess = MidiLogs.size() - LINESMAX;
-		MidiLogs.erase(MidiLogs.begin(), MidiLogs.begin() + excess);
+		const size_t Excess = MidiLogs.size() - LINESMAX;
+
+		MidiLogs.erase(
+			MidiLogs.begin(),
+			MidiLogs.begin() + Excess);
 	}
 	
+}
+
+std::string GlueMidi::GetConfigString(const std::string& Key, bool CreateIfNotFound /*= false*/)
+{
+	std::lock_guard<std::mutex> Lock(SettingsMutex);
+
+	const auto It = settings_pairs.find(Key);
+
+	if (It != settings_pairs.end())
+	{
+		return It->second;
+	}
+
+	if (CreateIfNotFound)
+	{
+		settings_pairs[Key] = "";
+	}
+
+	return "";
+}
+
+int GlueMidi::GetConfigInt(const std::string& Key, bool CreateIfNotFound /*= false*/)
+{
+	std::lock_guard<std::mutex> Lock(SettingsMutex);
+
+	const auto It = settings_pairs.find(Key);
+
+	if (It == settings_pairs.end())
+	{
+		if (CreateIfNotFound)
+		{
+			settings_pairs[Key] = "-1";
+		}
+
+		return -1;
+	}
+
+	try
+	{
+		return std::stoi(It->second);
+	}
+	catch (const std::exception&)
+	{
+		return -1;
+	}
+}
+
+std::vector<std::string> GlueMidi::GetConfigStringArray(const std::string& Key, bool CreateIfNotFound /*= false*/)
+{
+	std::lock_guard<std::mutex> Lock(SettingsMutex);
+
+	std::vector<std::string> Result;
+
+	const auto It = settings_pairs.find(Key);
+
+	if (It == settings_pairs.end())
+	{
+		if (CreateIfNotFound)
+		{
+			settings_pairs[Key] = "";
+		}
+
+		return Result;
+	}
+
+	if (It->second.empty())
+	{
+		return Result;
+	}
+
+	size_t Start = 0;
+
+	while (Start <= It->second.size())
+	{
+		const size_t End = It->second.find(',', Start);
+
+		if (End == std::string::npos)
+		{
+			Result.push_back(It->second.substr(Start));
+			break;
+		}
+
+		Result.push_back(
+			It->second.substr(Start, End - Start));
+
+		Start = End + 1;
+	}
+
+	return Result;
+}
+
+void GlueMidi::SetConfigString(const std::string& Key, const std::string& Value)
+{
+	std::lock_guard<std::mutex> Lock(SettingsMutex);
+	settings_pairs[Key] = Value;
+}
+
+void GlueMidi::SetConfigInt(const std::string& Key, const int Value)
+{
+	std::lock_guard<std::mutex> Lock(SettingsMutex);
+	settings_pairs[Key] = std::to_string(Value);
+}
+
+void GlueMidi::SetConfigStringArray(const std::string& Key, const std::vector<std::string>& Values)
+{
+	std::ostringstream Stream;
+
+	for (size_t Index = 0; Index < Values.size(); ++Index)
+	{
+		if (Index > 0)
+		{
+			Stream << ',';
+		}
+
+		Stream << Values[Index];
+	}
+
+	std::lock_guard<std::mutex> Lock(SettingsMutex);
+	settings_pairs[Key] = Stream.str();
+}
+
+void GlueMidi::UpdateInputsConfig(std::string Name, bool bRemove /*= false*/)
+{
+	std::lock_guard<std::mutex> Lock(SettingsMutex);
+
+	std::vector<std::string> PreviousInputs;
+
+	const auto It = settings_pairs.find("inmidis");
+
+	if (It != settings_pairs.end() && !It->second.empty())
+	{
+		size_t Start = 0;
+
+		while (Start <= It->second.size())
+		{
+			const size_t End = It->second.find(',', Start);
+
+			if (End == std::string::npos)
+			{
+				PreviousInputs.push_back(
+					It->second.substr(Start));
+
+				break;
+			}
+
+			PreviousInputs.push_back(
+				It->second.substr(Start, End - Start));
+
+			Start = End + 1;
+		}
+	}
+
+	const auto Found = std::find(
+		PreviousInputs.begin(),
+		PreviousInputs.end(),
+		Name);
+
+	if (Found != PreviousInputs.end())
+	{
+		if (bRemove)
+		{
+			PreviousInputs.erase(Found);
+		}
+	}
+	else if (!bRemove)
+	{
+		PreviousInputs.push_back(Name);
+	}
+
+	std::ostringstream Stream;
+
+	for (size_t Index = 0;
+		Index < PreviousInputs.size();
+		++Index)
+	{
+		if (Index > 0)
+		{
+			Stream << ',';
+		}
+
+		Stream << PreviousInputs[Index];
+	}
+
+	settings_pairs["inmidis"] = Stream.str();
+}
+
+void GlueMidi::SaveSettings()
+{
+	std::unordered_map<std::string, std::string> Snapshot;
+
+	{
+		std::lock_guard<std::mutex> Lock(SettingsMutex);
+		Snapshot = settings_pairs;
+	}
+
+	writeAppSettings(iniFileName, Snapshot);
 }

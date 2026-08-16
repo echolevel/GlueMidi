@@ -12,6 +12,7 @@
 #include <codecvt>
 #define __WINDOWS_MM__
 #include "GlueMidi.h"
+#include "GlueMidiWorker.h"
 
 
 // Data
@@ -389,9 +390,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// TO DO - make this all work. Testing ser/deser with the full array of names for now
 	std::vector<std::string> activeInputs;
 	
-	//gluemidi->SetConfigStringArray("inmidis", gluemidi->ActiveMidiInNames);
+	// This is possibly redundant - should already have been saved when set and now we're tearing down?
+	// Oh well
+	const MidiPortUiSnapshot Snapshot = gluemidi->MidiWorker_->GetSnapshot();
 
-	gluemidi->SetConfigString("outmidi", gluemidi->MidiOutNames[gluemidi->MidiOutIndex]);
+	if (Snapshot.OutputOpen &&
+		Snapshot.CurrentOutputIndex >= 0 &&
+		Snapshot.CurrentOutputIndex < static_cast<int>(Snapshot.Outputs.size()))
+	{
+		gluemidi->SetConfigString("outmidi", Snapshot.Outputs[Snapshot.CurrentOutputIndex]);
+	}
+
+	// Save regardless
 	gluemidi->SaveSettings();
 
 	gluemidi->releaseMidiPorts();
@@ -597,9 +607,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			case IDT_TIMER1:
 				if (g_gluemidi != nullptr)
 				{
-					if (g_gluemidi->portCountHasChanged())
+					if (g_gluemidi->MidiWorker_)
 					{
-						g_gluemidi->refreshMidiPorts();
+						g_gluemidi->MidiWorker_->QueueCheckPorts();
 					}
 				}
 			return 0;

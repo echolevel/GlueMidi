@@ -45,6 +45,9 @@
     <ClCompile Include="imgui_impl_win32.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="GlueMidiWorker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="GlueMidi.h">
@@ -61,6 +64,18 @@
     </ClInclude>
     <ClInclude Include="resource1.h">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Version.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GlueMidiWorker.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GlueMidiStructs.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GlueMidiThemes.h">
+      <Filter>Source Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

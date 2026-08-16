@@ -1,0 +1,7 @@
+// Version.h
+#pragma once
+
+#define GLUEMIDI_VERSION_MAJOR 0
+#define GLUEMIDI_VERSION_MINOR 2
+#define GLUEMIDI_VERSION_PATCH 1
+#define GLUEMIDI_VERSION_STRING "0.2.1"
