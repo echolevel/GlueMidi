@@ -113,271 +113,346 @@ GlueMidi::~GlueMidi()
 	// midiin/midiout now created and destroyed on the worker thread
 }
 
-void GlueMidi::ProcessMidiMessageForMonitor(const MidiInputUiState& Input, double deltatime, const std::vector<unsigned char>& message)
+void GlueMidi::ProcessMidiMessageForMonitor(
+	const MidiInputUiState& Input,
+	const double DeltaTime,
+	const std::vector<unsigned char>& Message)
 {
-	AnimDeltaCounter += deltatime;
+	AnimDeltaCounter += DeltaTime;
 
-
-	if (message.size() < 1)
+	if (Message.empty())
 	{
 		return;
 	}
 
-	int channel = 0;
-	int note = 0;
-	bool noteOff = false;
-	int velocity = 0;
-	int pressure = 0;
-	int program = 0;
-	int pitchbend = 0x2000;
-	int ccNum = 0;
-	int ccChan = 0;
-	int ccValue = 0;
-	bool is14bit = false;
-	int value14bit = 0;
+	const uint8_t Status = Message[0];
+	const uint8_t Type = Status & 0xF0;
+	const int Channel = (Status & 0x0F) + 1;
 
-	std::stringstream finalhexout;
+	const bool IsNote =
+		Type == 0x80 ||
+		Type == 0x90;
 
-	// https://www.hinton-instruments.co.uk/reference/midi/protocol/index.htm
+	const bool IsCC = Type == 0xB0;
+	const bool IsSysEx = Status == 0xF0;
+	const bool IsSystem = Status >= 0xF0 && !IsSysEx;
 
-	const unsigned char statusByte = message[0];
+	const bool IsOtherChannelMessage =
+		Status < 0xF0 &&
+		!IsNote &&
+		!IsCC;
 
-	if (statusByte < 0xF0)
+	if ((IsNote && !filterShowNotes) ||
+		(IsCC && !filterShowCC) ||
+		(IsSysEx && !filterShowSysex) ||
+		(IsSystem && !filterShowSys) ||
+		(IsOtherChannelMessage && !filterShowOther))
 	{
-		const unsigned char messageType = statusByte & 0xF0;
+		return;
+	}
 
-		const size_t requiredSize =
-			(messageType == 0xC0 || messageType == 0xD0) ? 2 : 3;
+	size_t RequiredSize = 1;
 
-		if (message.size() < requiredSize)
+	if (Status < 0xF0)
+	{
+		RequiredSize =
+			(Type == 0xC0 || Type == 0xD0)
+			? 2
+			: 3;
+	}
+	else
+	{
+		switch (Status)
 		{
-			return;
+		case 0xF1:
+		case 0xF3:
+			RequiredSize = 2;
+			break;
+
+		case 0xF2:
+			RequiredSize = 3;
+			break;
+
+		default:
+			RequiredSize = 1;
+			break;
 		}
 	}
 
-	switch (statusByte >> 4)
+	if (Message.size() < RequiredSize)
 	{
-	case 0x08:	// Note Off
-		channel = statusByte & 0x0F;
-		note = (int)message.at(1);
-		velocity = (int)message.at(2);
-		break;
-
-	case 0x09:	// Note On
-		channel = statusByte & 0x0F;
-		note = (int)message.at(1);
-		velocity = (int)message.at(2);
-		break;
-
-	case 0x0a:	// Poly aftertouch
-		channel = statusByte & 0x0F;
-		note = (int)message.at(1);
-		pressure = (int)message.at(2);
-		break;
-
-	case 0x0b:	// Control Change (or mode change)
-		channel = statusByte & 0x0F;
-		ccNum = (int)message.at(1);
-		ccValue = (int)message.at(2);
-		break;
-
-	case 0x0c:	// Program Change
-		channel = statusByte & 0x0F;
-		program = (int)message.at(1);
-		break;
-
-	case 0x0d:	// Channel aftertouch
-		channel = statusByte & 0x0F;
-		pressure = (int)message.at(1);
-		break;
-	case 0x0e:	// Pitchbend
-		channel = statusByte & 0x0F;
-		int lsb = (int)message.at(1);
-		int msb = (int)message.at(2);
-		pressure = (msb << 7) | lsb;
-		break;
+		return;
 	}
 
-	// System Common
-	switch (statusByte)
+	const char* MessageTypeName = "Unknown";
+
+	switch (Type)
 	{
-	case 0xf0:	// Sysex start
-
+	case 0x80:
+		MessageTypeName = "Note Off";
 		break;
-	case 0xf1:	// Quarter Frame
 
+	case 0x90:
+		MessageTypeName =
+			Message[2] == 0
+			? "Note Off"
+			: "Note On";
 		break;
-	case 0xf2:	// Song Position Pointer
 
+	case 0xA0:
+		MessageTypeName = "Poly Aftertouch";
 		break;
-	case 0xf3:	// Song Select
 
+	case 0xB0:
+		MessageTypeName = "Control Change";
 		break;
-	case 0xf4:	// undefined
 
+	case 0xC0:
+		MessageTypeName = "Program Change";
 		break;
-	case 0xf5:	// undefined
 
+	case 0xD0:
+		MessageTypeName = "Channel Aftertouch";
 		break;
-	case 0xf6:	// Tune Request
 
+	case 0xE0:
+		MessageTypeName = "Pitch Bend";
 		break;
-	case 0xf7:	// Sysex end
 
-		break;
-	}
-
-	// System Realtime
-	switch (statusByte)
-	{
-	case 0xf8:	// Timing clock
-
-		break;
-	case 0xf9:	// undefined
-
-		break;
-	case 0xfa:	// Start
-
-		break;
-	case 0xfb:	// Continue
-
-		break;
-	case 0xfc:	// Stop
-
-		break;
-	case 0xfd:	// undefined
-
-		break;
-	case 0xfe:	// Active Sensing
-
-		break;
-	case 0xff:	// System Reset
-
-		break;
-	}
-
-	// Is this a sysex message?
- 	if (((int)message.at(0) == 0xF0) && (message.size() >= 14) && !displayRaw)
- 	{
- 		std::vector<unsigned char>::const_iterator it = message.begin();
- 		// UNUSED - we're not formatting sysex yet...
-
-		// until we DO deal with sysex, treat it as raw data
-		for (const unsigned char Byte : message)
+	case 0xF0:
+		switch (Status)
 		{
-			finalhexout
+		case 0xF0:
+			MessageTypeName = "SysEx";
+			break;
+
+		case 0xF1:
+			MessageTypeName = "MTC Quarter Frame";
+			break;
+
+		case 0xF2:
+			MessageTypeName = "Song Position";
+			break;
+
+		case 0xF3:
+			MessageTypeName = "Song Select";
+			break;
+
+		case 0xF6:
+			MessageTypeName = "Tune Request";
+			break;
+
+		case 0xF7:
+			MessageTypeName = "SysEx End";
+			break;
+
+		case 0xF8:
+			MessageTypeName = "Clock";
+			break;
+
+		case 0xFA:
+			MessageTypeName = "Start";
+			break;
+
+		case 0xFB:
+			MessageTypeName = "Continue";
+			break;
+
+		case 0xFC:
+			MessageTypeName = "Stop";
+			break;
+
+		case 0xFE:
+			MessageTypeName = "Active Sensing";
+			break;
+
+		case 0xFF:
+			MessageTypeName = "System Reset";
+			break;
+
+		default:
+			MessageTypeName = "System";
+			break;
+		}
+
+		break;
+	}
+
+	std::ostringstream Output;
+	Output << '[' << MessageTypeName << "] ";
+
+	bool Is14Bit = false;
+	int CCNumber = -1;
+
+	if (displayRaw)
+	{
+		for (const uint8_t Byte : Message)
+		{
+			Output
 				<< std::setfill('0')
 				<< std::setw(2)
 				<< std::hex
 				<< static_cast<int>(Byte)
 				<< ' ';
 		}
- 	}
-
-	// Is this a control message status byte? Check if MSB is 0B
-	else if ((((int)message.at(0) >> 4) == 0x0b) && !displayRaw)
+	}
+	else
 	{
-		ccNum = (int)message.at(1);
-		ccChan = ((int)message.at(0) & 0x0F) + 1;
-		ccValue = (int)message.at(2);
-
-		is14bit = false;
-		value14bit = 0;
-		// If this CC number is equal to the last one + 32, and the channel is the same, it's 14-bit o'clock!
-		if ((ccNum == (lastCCnum + 32)) && (ccChan == lastChannel))
+		switch (Type)
 		{
-			is14bit = true;
-			value14bit = (lastCCvalue << 7) | ccValue;
+		case 0x80:
+		case 0x90:
+		{
+			const int Note = Message[1];
+			const int Velocity = Message[2];
+
+			Output
+				<< "Chan:" << Channel
+				<< " Note:" << Note
+				<< " Velocity:" << Velocity;
+
+			break;
 		}
 
-		// It is, so get the channel from the LSB. We add 1 for display purposes.
-		finalhexout << "Chan:" << ccChan << " ";
+		case 0xA0:
+			Output
+				<< "Chan:" << Channel
+				<< " Note:" << static_cast<int>(Message[1])
+				<< " Pressure:" << static_cast<int>(Message[2]);
+			break;
 
-		// Control message
-		finalhexout << "CC";
-
-		// Next byte will be CC number
-		finalhexout << ccNum;
-
-		// Then value
-		if (is14bit)
+		case 0xB0:
 		{
-			finalhexout << " Value 14bit: " << value14bit;
-		}
-		// Only display 7bit values if the 14bit filter is disabled
-		else
-		{
-			finalhexout << " Value 7bit: " << ccValue;
+			CCNumber = Message[1];
+			const int CCValue = Message[2];
+
+			if (CCNumber == lastCCnum + 32 &&
+				Channel == lastChannel)
+			{
+				Is14Bit = true;
+
+				const int Value14Bit =
+					(lastCCvalue << 7) | CCValue;
+
+				Output
+					<< "Chan:" << Channel
+					<< " CC:" << CCNumber
+					<< " Value 14-bit:" << Value14Bit;
+			}
+			else
+			{
+				Output
+					<< "Chan:" << Channel
+					<< " CC:" << CCNumber
+					<< " Value:" << CCValue;
+			}
+
+			lastChannel = Channel;
+			lastCCnum = CCNumber;
+			lastCCvalue = CCValue;
+
+			break;
 		}
 
-		// Cache channel and CC num for later 14-bit checks
-		lastChannel = ccChan;
-		lastCCnum = ccNum;
-		lastCCvalue = ccValue;
+		case 0xC0:
+			Output
+				<< "Chan:" << Channel
+				<< " Program:" << static_cast<int>(Message[1]);
+			break;
+
+		case 0xD0:
+			Output
+				<< "Chan:" << Channel
+				<< " Pressure:" << static_cast<int>(Message[1]);
+			break;
+
+		case 0xE0:
+		{
+			const int PitchBend =
+				(static_cast<int>(Message[2]) << 7) |
+				static_cast<int>(Message[1]);
+
+			Output
+				<< "Chan:" << Channel
+				<< " Value:" << PitchBend;
+
+			break;
+		}
+
+		default:
+			for (const uint8_t Byte : Message)
+			{
+				Output
+					<< std::setfill('0')
+					<< std::setw(2)
+					<< std::hex
+					<< static_cast<int>(Byte)
+					<< ' ';
+			}
+			break;
+		}
 	}
 
-	// It's not CC or sysex so just display raw bytes
-	else for (auto it = message.begin(); it != message.end(); it++)
-	{
-		finalhexout << std::setfill('0') << std::setw(sizeof(char) * 2) << std::hex << int(*it) << " ";
-	}
-
-	const bool isCC = (statusByte & 0xF0) == 0xB0;
-
-	// Always display raw bytes if filter enabled
 	if (!displayRaw)
 	{
-		// Die if channel filter is enabled and this doesn't match
-		if (filterChannel >= 1 && (!isCC || ccChan != filterChannel))
+		// Don't filter sysex by channel, since sysex messages don't have 'em
+		if (filterChannel >= 1 &&
+			Status < 0xF0 &&
+			Channel != filterChannel)
 		{
 			return;
 		}
 
-		// Die if CC filter is enabled and this doesn't match
-		if (filterCC >= 0 && (!isCC || ccNum != filterCC))
+		if (filterCC >= 0 &&
+			(!IsCC || CCNumber != filterCC))
 		{
 			return;
 		}
 
-		// Die if this is a 7bit value but the 14-bit filter is enabled
-		if (filter14bit && !is14bit)
+		if (filter14bit && !Is14Bit)
 		{
 			return;
 		}
 	}
 
-
-	// Is logging enabled for this input?
 	if (!Input.LogMute)
 	{
-		if (!isInputEmpty(buf_filter))
-		{
-			const std::string filterStr = normaliseString(buf_filter);
-			const std::vector<std::string> filters = splitString(filterStr, ',');
+		bool MatchesInputFilter = isInputEmpty(buf_filter);
 
-			for (const std::string& filter : filters)
+		if (!MatchesInputFilter)
+		{
+			const std::vector<std::string> Filters =
+				splitString(
+					normaliseString(buf_filter),
+					',');
+
+			for (const std::string& Filter : Filters)
 			{
-				if (filter.size() >= 3 &&
-					partialMatchFilter(filter.c_str(), Input.Name))
+				if (Filter.size() >= 3 &&
+					partialMatchFilter(
+						Filter.c_str(),
+						Input.Name))
 				{
-					Log((finalhexout.str() + "\t" + Input.Name).c_str());
+					MatchesInputFilter = true;
 					break;
 				}
 			}
 		}
-		else
+
+		if (MatchesInputFilter)
 		{
-			Log((finalhexout.str() + "\t" + Input.Name).c_str());
+			Log(
+				(Output.str() + "\t" + Input.Name)
+				.c_str());
 		}
 	}
 
 	if (AnimDeltaCounter > AnimDeltaThreshold)
 	{
 		CallAnimate();
-		AnimDeltaCounter = 0;
- 	}
+		AnimDeltaCounter = 0.0;
+	}
 }
-
 void GlueMidi::ProcessMonitorMidiMessages()
 {
 	if (!MidiWorker_)
@@ -715,44 +790,25 @@ void GlueMidi::Update()
 
 		ImGui::Text("Midi Monitor");
 
-		ImGui::AlignTextToFramePadding();
-		ImGui::Text("Filters: ");
+		ImGui::AlignTextToFramePadding();		
+		ImGui::Checkbox("Note", &filterShowNotes);
 		ImGui::SameLine();
-		static bool c_shownotes = filterShowNotes;
-		if (ImGui::Checkbox("Notes", &c_shownotes))
-		{
-			filterShowNotes = c_shownotes;
-		}
+		ImGui::Checkbox("CC", &filterShowCC);
 		ImGui::SameLine();
-		static bool c_showcc = filterShowCC;
-		if (ImGui::Checkbox("CC", &c_showcc))
-		{
-			filterShowCC = c_showcc;
-		}
+		ImGui::Checkbox("Other", &filterShowOther);
+		ImGui::SetItemTooltip("Pitchbend, aftertouch, etc.");
 		ImGui::SameLine();
-		static bool c_showsys = filterShowSys;
-		if (ImGui::Checkbox("Sys", &c_showsys))
-		{
-			filterShowSys = c_showsys;
-		}
+		ImGui::Checkbox("Sys", &filterShowSys);
 		ImGui::SameLine();
-		static bool c_showsysex = filterShowSysex;
-		if (ImGui::Checkbox("SysEx", &c_showsysex))
-		{
-			filterShowSysex = c_showsysex;
-		}
+		ImGui::Checkbox("SysEx", &filterShowSysex);
 		ImGui::SameLine();
-		static bool c_showraw = filterShowRaw;
-		if (ImGui::Checkbox("Raw", &c_showraw))
-		{
-			filterShowRaw = c_showraw;
-		}
+		ImGui::Checkbox("Raw", &displayRaw);
 
 		ImGui::SameLine();
 		ImGuiInputTextFlags InTextFlags = ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_AutoSelectAll;
 
-		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-		ImGui::InputText("##FilterInput", buf_filter, 32, InTextFlags);
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
+		ImGui::InputTextWithHint("##FilterInput", "Filter device names", buf_filter, sizeof(buf_filter), InTextFlags);
 		ImGui::SetItemTooltip("Filter Input names with 3 or more matching characters.\nUse ',' to separate multiple filters.\nEmpty filter logs all inputs.");
 		
 		if (!isInputEmpty(buf_filter))
@@ -764,6 +820,39 @@ void GlueMidi::Update()
 			}
 		}		
 		
+		// channel filter
+
+		ImGui::SameLine();
+
+		static const char* ChannelNames[] =
+		{
+			"Omni",
+			"1",  "2",  "3",  "4",
+			"5",  "6",  "7",  "8",
+			"9",  "10", "11", "12",
+			"13", "14", "15", "16"
+		};
+
+		// filterChannel:
+		//   0 = Omni
+		//   1-16 = MIDI channel
+
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 4.5f);
+
+		int ChannelIndex = filterChannel;
+
+		if (ImGui::Combo(
+			"##ChannelFilter",
+			&ChannelIndex,
+			ChannelNames,
+			IM_ARRAYSIZE(ChannelNames)))
+		{
+			filterChannel = ChannelIndex;
+		}
+
+		ImGui::SetItemTooltip("Filter by MIDI channel");
+
+		// channel filter end
 
 		
 		static ImGuiInputTextFlags flags = ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoHorizontalScroll;

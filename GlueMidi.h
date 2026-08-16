@@ -137,6 +137,7 @@ public:
 	bool filterShowSys = true;
 	bool filterShowSysex = true;
 	bool filterShowRaw = true;
+	bool filterShowOther = true;// program change, pitchbend, aftertouch etc
 
 	double AnimDeltaCounter = 0;
 	double AnimDeltaThreshold = 0.100;
